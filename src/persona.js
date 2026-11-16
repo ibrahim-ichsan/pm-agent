@@ -30,3 +30,10 @@ export function flavour(lang, key, seed = 0, vars = {}) {
   const arr = FLAVOUR[lang]?.[key] || FLAVOUR.en[key];
   return arr[seed % arr.length].replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '');
 }
+
+// Owner context layer: static facts about the owner from config vars, added to a prompt only when a reply
+// is written for or about the owner (drafts, questions). Empty when the vars are not set.
+export function ownerContext(cfg = {}) {
+  const parts = [cfg.ownerBio && `About the owner: ${cfg.ownerBio}`, cfg.ownerGoals && `Owner's goals: ${cfg.ownerGoals}`, cfg.ownerPreferences && `Owner's preferences: ${cfg.ownerPreferences}`].filter(Boolean);
+  return parts.length ? `${parts.join('\n')}\n` : '';
+}

@@ -1,4 +1,5 @@
 // Morning digest and the midweek and weekly reviews. Pure: data in, text and buttons out.
+import { topPriorities, rank } from './priority.js';
 import { addDays, diffDays, mondayOf, pretty } from './dates.js';
 import { flavour } from './persona.js';
 import { explain } from './explain.js';
@@ -73,10 +74,12 @@ export function buildDigest(d) {
     if (heads.length) lines.push(L(lang, 'Heads-up for the next month, worth starting early:', 'Buat sebulan ke depan, mending dicicil dari sekarang:'), ...heads);
   } else {
     lines.push(`<b>${pretty(today)}</b>`);
+    const ranked = topPriorities(d, (en, id) => L(lang, en, id));
+    if (ranked) lines.push('', ranked, '');
     if (load >= 8) {
       lines.push(flavour(lang, 'busy', seed));
       const top = [...overdue, ...due.filter((t) => t.due === today)].sort(byPriority).slice(0, 3);
-      if (top.length) lines.push(L(lang, 'Top three: ', 'Tiga teratas: ') + top.map((t) => esc(t.title)).join(', '));
+      if (top.length && !ranked) lines.push(L(lang, 'Top three: ', 'Tiga teratas: ') + top.map((t) => esc(t.title)).join(', '));
     } else if (load <= 2) lines.push(flavour(lang, 'light', seed));
     lines.push('', present.join('\n\n'));
   }
@@ -126,5 +129,12 @@ export function buildReview(kind, d) {
   if (pipeline) lines.push(`<b>${L(lang, 'Applications open', 'Lamaran aktif')}</b>\n${pipeline}`);
   const soon = d.apps.filter((a) => a.due && a.due >= today && a.due <= nextEnd);
   if (soon.length) lines.push(soon.map((a) => `• ${pretty(a.due)}: ${esc(a.title)}`).join('\n'));
+  const active = d.apps.filter((a) => ['Interview', 'Online test'].includes(a.stage) || (a.lastUpdate && a.lastUpdate >= mon && a.tier !== 'Tier 3'));
+  if (active.length) lines.push(`<b>${L(lang, 'Applications that moved or are live', 'Lamaran yang gerak atau lagi jalan')}</b>\n${active.slice(0, MAX).map((a) => `• ${esc(a.title)} · ${a.stage}${a.tier ? ` · ${a.tier}` : ''}`).join('\n')}`);
+  const net = d.net || [];
+  const owed = net.filter((r) => r.status === 'Attended');
+  if (owed.length) lines.push(`<b>${L(lang, 'Networking follow-ups open', 'Follow-up networking yang masih buka')}</b>\n${owed.slice(0, MAX).map((r) => `• ${esc((r.people.split('\n')[0] || r.title).slice(0, 70))}${r.followUp ? ` (${pretty(r.followUp)})` : ''}`).join('\n')}`);
+  const next = rank({ ...d, today }, { horizon: 7 }).slice(0, 3);
+  if (next.length) lines.push(`<b>${L(lang, 'What matters next', 'Yang penting berikutnya')}</b>\n${next.map((x, i) => `${i + 1}. ${esc(x.title)} — ${esc(x.why)}`).join('\n')}`);
   return lines.join('\n\n');
 }

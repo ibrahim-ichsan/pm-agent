@@ -3,6 +3,8 @@
 // /followups lists the conversations still waiting for a follow-up.
 import { addDays, pretty, readDate } from './dates.js';
 import { similarity } from './parse.js';
+import { ownerContext } from './persona.js';
+import { rank, signalsOf } from './priority.js';
 
 const PLAYS = ['Thank-you note', 'Ask for intro', 'Reach out', 'Learn', 'Apply'];
 const join = (old, add) => [old, add].filter((s) => s && String(s).trim()).join('\n').slice(0, 1900);
@@ -94,14 +96,28 @@ Message: ${text}` }], { json: true, system: 'You extract structured data. Output
     }
   }
 
+  // The few conversations that need attention now, most valuable first, each with the reason.
   async function followups() {
     if (!ready()) return off();
+    const n = now();
     let rows;
     try { rows = await store.networking(); } catch (e) { return fail(e); }
-    const due = rows.filter((r) => r.status === 'Attended').sort((a, b) => (a.followUp || '9').localeCompare(b.followUp || '9'));
-    if (!due.length) return say(T('Nothing waiting for a follow-up.', 'Nggak ada yang nunggu follow-up.'));
-    const lines = due.slice(0, 10).map((r) => `• <b>${esc(r.title)}</b>${r.followUp ? ` · ${T('by', 'sebelum')} ${pretty(r.followUp)}` : ''}${r.nextSteps ? `\n  ${esc(r.nextSteps.split('\n')[0].slice(0, 160))}` : ''}`);
-    return say(`<b>${T('Waiting for a follow-up', 'Nunggu follow-up')} (${due.length})</b>\n${lines.join('\n')}`, { buttons: due.slice(0, 6).map((r) => btn(`✓ ${r.title.slice(0, 40)}`, { type: 'net_done', id: r.id, title: r.title })) });
+    const waiting = rows.filter((r) => r.status === 'Attended');
+    if (!waiting.length) return say(T('Nothing waiting for a follow-up.', 'Nggak ada yang nunggu follow-up.'));
+    const ranked = rank({ net: waiting, today: n.date }, { horizon: 365 }).filter((x) => x.kind === 'net');
+    const byId = new Map(waiting.map((r) => [r.id, r]));
+    const top = ranked.slice(0, 5);
+    const lines = [`<b>${T('Waiting for a follow-up', 'Nunggu follow-up')} (${waiting.length})</b>`];
+    for (const x of top) {
+      const r = byId.get(x.id);
+      lines.push('', `<b>${esc((r.people.split('\n')[0] || r.title).slice(0, 80))}</b>`, `${T('Why now', 'Kenapa sekarang')}: ${esc(x.why)}`);
+      if (r.topics) lines.push(`${T('You discussed', 'Bahasan')}: ${esc(r.topics.split('\n')[0].slice(0, 160))}`);
+      lines.push(`${T('Do', 'Lakuin')}: ${esc(r.nextSteps ? r.nextSteps.split('\n')[0].slice(0, 160) : r.people ? (r.plays[0] || 'Thank-you note') : T('turn one takeaway into a task', 'jadiin satu takeaway task'))}`);
+    }
+    if (waiting.length > top.length) lines.push('', T(`${waiting.length - top.length} more are lower priority.`, `${waiting.length - top.length} lagi prioritasnya lebih rendah.`));
+    const buttons = top.slice(0, 4).map((x) => btn(`✓ ${byId.get(x.id).title.slice(0, 36)}`, { type: 'net_done', id: x.id, title: byId.get(x.id).title }));
+    if (llm.enabled && top[0] && byId.get(top[0].id).people) buttons.unshift(btn(T('Draft the first message', 'Bikinin draft pesan pertama'), { type: 'net_thanks', id: top[0].id }));
+    return say(lines.join('\n'), { buttons });
   }
 
   // Button actions. Returns undefined for actions that are not ours.
@@ -110,7 +126,7 @@ Message: ${text}` }], { json: true, system: 'You extract structured data. Output
     if (a.type !== 'net_thanks' && a.type !== 'net_ask') return undefined;
     const row = (await store.networking()).find((r) => r.id === a.id);
     if (!row) return say(T('That entry is no longer open.', 'Entry itu udah nggak ada.'));
-    const me = cfg.ownerBio ? `About the owner: ${cfg.ownerBio}\n` : '';
+    const me = ownerContext(cfg);
     try {
       if (a.type === 'net_thanks') {
         const out = await llm.generate([{ text: `${me}Write a short thank-you message (LinkedIn or email, under 90 words, plain English, no flattery) from the owner to the person below. Mention one or two specific things from the conversation, ask whether there is anyone else worth speaking to, and ask whether the owner may keep them posted. Use only these notes; if a detail is missing, leave a [bracket] for the owner to fill.

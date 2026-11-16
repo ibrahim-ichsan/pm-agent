@@ -7,7 +7,10 @@ export function loadConfig(e = env) {
   return {
     telegramToken: e.TELEGRAM_TOKEN || '',
     ownerId: Number(e.OWNER_TELEGRAM_ID || 0),
-    ownerBio: e.OWNER_BIO || '', // optional: two lines about the owner, used when drafting messages and questions
+    // Optional owner context for the language model. The bot works without any of them.
+    ownerBio: e.OWNER_BIO || '',
+    ownerGoals: e.OWNER_GOALS || '',
+    ownerPreferences: e.OWNER_PREFERENCES || '',
     ownerNames: e.OWNER_NAMES || '', // how the owner is named in meeting notes, e.g. "Ibrahim, Ichsan"
     notionToken: e.NOTION_TOKEN || '',
     notion: {

@@ -23,7 +23,8 @@ test('B1 adapts to load: busy day names the top three', () => {
   const tasks = Array.from({ length: 9 }, (_, i) => task(`T${i}`, today, { priority: i === 5 ? 'Must' : 'Should' }));
   const { text } = buildDigest({ ...base, tasks });
   assert.match(text, /Packed day|Big day energy/);
-  assert.match(text, /Top three: T5, /);
+  assert.match(text, /Top priorities today<\/b>\n1\. T5 — due today, Must/);
+  assert.match(text, /9 things are pressing today, which is more than fits/);
 });
 
 test('B1 agreed plan not on the calendar gets an Add button', () => {
@@ -59,7 +60,9 @@ test('B4 fourteen events: first ten and "4 more"', () => {
 
 test('B5 overdue: listed first with "5 days late" and an angry Gen Z line', () => {
   const { text } = buildDigest({ ...base, events: [ev(1)], tasks: [task('Today thing', today), task('Old essay', '2026-11-11')] });
-  assert.ok(text.indexOf('Old essay — 5 days late') < text.indexOf('Today thing'));
+  const dueBlock = text.slice(text.indexOf('<b>Due</b>'));
+  assert.ok(dueBlock.indexOf('Old essay — 5 days late') < dueBlock.indexOf('Today thing'));
+  assert.match(text, /Top priorities today[\s\S]*1\. Today thing — due today[\s\S]*2\. Old essay — 5 days late/);
   assert.match(text, /💀|😤/);
 });
 

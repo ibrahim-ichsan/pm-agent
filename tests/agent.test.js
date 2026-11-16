@@ -404,3 +404,78 @@ test('/followups lists conversations waiting, and the digest reminds on the day'
   await agent.sendDigest({ manual: true });
   assert.match(tg.last().text, /Networking follow-ups/);
 });
+
+// ---- v0.3: ranking across databases, /career, /app, /people
+const APPS3 = () => [
+  { kind: 'app', id: 'a1', title: 'BNY — Graduate Analyst', company: 'BNY', role: 'Graduate Analyst', stage: 'Interview', tier: 'Tier 1', due: '2026-11-17', track: 'Full-time / Grad 2027', location: 'Dublin', referral: '', notes: '' },
+  { kind: 'app', id: 'a2', title: 'Google — Financial Analyst', company: 'Google', role: 'Financial Analyst', stage: 'Wishlist', tier: 'Tier 1', due: '2026-11-19' },
+  { kind: 'app', id: 'a3', title: 'Acme — Admin', company: 'Acme', role: 'Admin', stage: 'Applied', tier: 'Tier 3', appliedOn: '2026-11-10' },
+];
+const NET3 = () => [
+  { kind: 'net', id: 'n1', title: 'UCD alumni night', org: 'Google', status: 'Attended', date: '2026-11-07', followUp: '2026-11-14', people: 'Clara (Treasury, Google)', topics: 'Treasury team, she mentioned they are hiring in spring', takeaways: '', nextSteps: 'Send her my CV', plays: ['Reach out'], prep: '' },
+  { kind: 'net', id: 'n2', title: 'Coffee with Clara', org: 'Google', status: 'Followed up', date: '2026-11-12', people: 'Clara (Treasury, Google)', topics: 'She offered a referral', takeaways: '', nextSteps: '', plays: [], prep: '' },
+  { kind: 'net', id: 'n3', title: 'Some webinar', org: '', status: 'Attended', date: '2026-11-15', followUp: '2026-11-22', people: '', topics: 'x', takeaways: 'y', nextSteps: '', plays: ['Learn'], prep: '' },
+];
+
+test('Ranking: reasons are stated, cross-database links raise the item, low-value rows stay out', async () => {
+  const { rank } = await import('../src/priority.js');
+  const d = { today: '2026-11-16', tasks: [{ title: 'Econometrics assignment', due: '2026-11-16', area: 'Coursework', priority: 'Must' }, { title: 'Tidy README', area: 'Side project' }], apps: APPS3(), net: NET3(), events: [{ title: 'BNY interview', date: '2026-11-17', start: '10:00', end: '11:00' }] };
+  const r = rank(d);
+  assert.equal(r[0].title, 'BNY — Graduate Analyst');
+  assert.match(r[0].why, /Tier 1.*interview.*deadline tomorrow.*no prep task yet.*BNY interview/);
+  assert.equal(r[1].title, 'Econometrics assignment');
+  assert.match(r[1].why, /due today, Must, Coursework/);
+  const clara = r.find((x) => x.kind === 'net' && /Clara/.test(x.title));
+  assert.match(clara.why, /hiring mentioned.*follow-up 2 days overdue/);
+  assert.ok(!r.some((x) => /README|Acme|webinar/i.test(x.title)), 'undated low-priority work is not ranked today');
+  const google = r.find((x) => /Google/.test(x.title));
+  assert.match(google.why, /not applied yet.*you know someone there/);
+});
+
+test('/career separates urgent, important and what can wait', async () => {
+  const { tg, agent } = setup({ store: { apps: APPS3(), net: NET3(), tasks: [{ kind: 'task', id: 't9', title: 'Polish LinkedIn banner', area: 'Job search', status: 'Not started' }] } });
+  await agent.handleUpdate(msg('/career'));
+  const t = tg.last().text;
+  assert.match(t, /Urgent[\s\S]*BNY — Graduate Analyst[\s\S]*Why: Tier 1/);
+  assert.match(t, /Important[\s\S]*Follow up: Clara/);
+  assert.match(t, /Can wait[\s\S]*Polish LinkedIn banner[\s\S]*Acme — Admin/);
+});
+
+test('/app shows the record, the people known there and the checks; prep task is offered, not created', async () => {
+  const { store, tg, agent } = setup({ store: { apps: APPS3(), net: NET3() } });
+  await agent.handleUpdate(msg('/app google'));
+  assert.match(tg.last().text, /Google — Financial Analyst[\s\S]*Tier 1[\s\S]*Networking at this company[\s\S]*Clara[\s\S]*still on the wishlist/);
+  await agent.handleUpdate(msg('/app bny'));
+  assert.match(tg.last().text, /Interview stage but no prep task exists/);
+  assert.equal(store.tasks.length, 0);
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Create a prep task/)));
+  assert.equal(store.tasks[0].title, 'Prepare BNY interview');
+  assert.equal(store.tasks[0].area, 'Job search');
+});
+
+test('/people gives the relationship from the log, with a computed state', async () => {
+  const { tg, agent } = setup({ store: { net: NET3() } });
+  await agent.handleUpdate(msg('/people clara'));
+  const t = tg.last().text;
+  assert.match(t, /Clara \(Treasury, Google\)/);
+  assert.match(t, /Relationship: Warm \(2 logged, last Thu 12 Nov/);
+  assert.match(t, /referral offered/);
+  assert.match(t, /Coffee with Clara[\s\S]*UCD alumni night/);
+  await agent.handleUpdate(msg('/people zed'));
+  assert.match(tg.last().text, /Nobody called "zed"/);
+});
+
+test('/followups ranks, explains why now, and caps the list', async () => {
+  const { tg, agent } = setup({ store: { net: NET3() } });
+  await agent.handleUpdate(msg('/followups'));
+  const t = tg.last().text;
+  assert.ok(t.indexOf('Clara') < t.indexOf('Some webinar'), 'a person with signals outranks a learning entry');
+  assert.match(t, /Why now: met at UCD alumni night, hiring mentioned, follow-up 2 days overdue/);
+  assert.match(t, /Do: Send her my CV/);
+});
+
+test('Owner context is optional and layered in only when set', async () => {
+  const { ownerContext } = await import('../src/persona.js');
+  assert.equal(ownerContext({}), '');
+  assert.equal(ownerContext({ ownerBio: 'B', ownerGoals: 'G' }), 'About the owner: B\nOwner\'s goals: G\n');
+});

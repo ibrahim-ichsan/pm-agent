@@ -9,6 +9,7 @@ import { buildDigest, buildReview, parsePlan, agreedPlan, appsNeedingAttention }
 import { readCalendars } from './calendar.js';
 import { docxText } from './docx.js';
 import { createNetworking, followUpLines } from './network.js';
+import { createCareer } from './career.js';
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const UNDO_MS = 10 * 60 * 1000;
@@ -96,6 +97,9 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
       case 'shift': return logShift(arg);
       case 'net': case 'met': return net.log(arg);
       case 'prep': return net.prep(arg);
+      case 'career': return career.career();
+      case 'app': return career.appDetail(arg);
+      case 'people': case 'person': return career.people(arg);
       case 'followups': case 'followup': return net.followups();
       case 'usage': return say(llm.enabled ? usageNote(llm.usage(), lastLang) + (llm.model() ? `\nModel: ${llm.model()}` : '') : T('No language model key is set, so only commands and simple capture work.', 'Belum ada key model, jadi cuma command sama capture sederhana yang jalan.'));
       case 'lang': return setLang(['en', 'id', 'auto'].includes(arg) ? arg : null);
@@ -541,7 +545,9 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
           const n = now();
           const days = FOLLOW_UP_DAYS[a.to];
           const app = await store.updateApp(a.id, { stage: a.to, lastUpdate: n.date, followUp: days ? addDays(n.date, days) : null });
-          return say(T(`"${esc(app.title)}" is now ${app.stage}.${app.followUp ? ` Next follow-up ${pretty(app.followUp)}.` : ''}`, `"${esc(app.title)}" sekarang ${app.stage}.${app.followUp ? ` Follow-up berikutnya ${pretty(app.followUp)}.` : ''}`));
+          // A new interview or test usually needs preparing: offered, never created unasked.
+          const offer = ['Interview', 'Online test'].includes(app.stage) ? [btn(T('Create a prep task', 'Bikin task prep'), { type: 'make_task', title: `Prepare ${app.company || app.title} ${app.stage.toLowerCase()}`, due: app.due })] : [];
+          return say(T(`"${esc(app.title)}" is now ${app.stage}.${app.followUp ? ` Next follow-up ${pretty(app.followUp)}.` : ''}`, `"${esc(app.title)}" sekarang ${app.stage}.${app.followUp ? ` Follow-up berikutnya ${pretty(app.followUp)}.` : ''}`), { buttons: offer });
         }
         case 'apply_stages': {
           const n = now(); const ok = []; const bad = [];
@@ -558,6 +564,8 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
         case 'plan_for': return askPlan(a);
         case 'plan_to_cal': return planToCalendar(a.taskId, a.only);
         case 'net_done': case 'net_thanks': case 'net_ask': return net.onAction(a);
+        case 'app_show': return career.appDetail(a.q);
+        case 'make_task': { const t0 = await store.createTask({ title: a.title, area: 'Job search', priority: 'Must', due: a.due || null }); return say(T(`Created the task "${esc(t0.title)}"${t0.due ? `, due ${pretty(t0.due)}` : ''}.`, `Task "${esc(t0.title)}" udah dibikin${t0.due ? `, due ${pretty(t0.due)}` : ''}.`)); }
         case 'doc_kind': return pickDocProject(a);
         case 'doc_for': return runDoc(a, { id: a.id, title: a.title, due: a.due });
         case 'doc_new': { const t0 = await store.createTask({ title: a.name, area: 'Coursework' }); await say(T(`Created the project task "${esc(t0.title)}" in Notion.`, `Task project "${esc(t0.title)}" udah dibikin di Notion.`)); return runDoc(a, { id: t0.id, title: t0.title, due: t0.due }); }
@@ -632,7 +640,7 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
     const { events, failures } = await readCalendars(cal, cfg.google.readCalendars, from, to);
     const [tasks, apps, roadmap] = await Promise.all([store.openTasks(), store.openApps(), store.roadmap().catch(() => [])]);
     const networking = store.networking ? await store.networking().catch(() => []) : [];
-    return { events, calFailures: failures, tasks, apps, roadmap, followUps: followUpLines(networking, from) };
+    return { events, calFailures: failures, tasks, apps, roadmap, net: networking, followUps: followUpLines(networking, from) };
   }
   async function sendDigest({ manual = false } = {}) {
     const n = now();
@@ -661,6 +669,7 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
     await say(`⏰ ${label} ${when} (${pretty(item.due, item.time)}): <b>${esc(item.title)}</b>`, { buttons });
   }
 
+  const career = createCareer({ cfg, store, say, btn, T, esc, now, fail, gather });
   return { handleUpdate, sendDigest, sendReview, sendReminder, capture, _pending: pending, _actions: actions, lang: () => lastLang };
 }
 
@@ -684,6 +693,7 @@ Commands
 /brief send a project brief · /plan save the agreed timeline
 /shift log a part-time shift · /usage model usage
 /net log who you met · /prep what to ask next · /followups
+/career what matters now · /app <company> · /people <name>
 /lang en | id | auto · /retry last failed capture
 
 Files: send meeting notes or a project brief as PDF or Word (.docx) and I ask which project it is for.`,
@@ -700,6 +710,7 @@ Command
 /brief kirim brief project · /plan simpen timeline final
 /shift catat shift part-time · /usage pemakaian model
 /net catat ketemu siapa · /prep mau nanya apa · /followups
+/career yang penting sekarang · /app <company> · /people <nama>
 /lang en | id | auto · /retry ulang capture yang gagal
 
 File: kirim notulen meeting atau brief project (PDF atau Word .docx), nanti gue tanya buat project yang mana.`,

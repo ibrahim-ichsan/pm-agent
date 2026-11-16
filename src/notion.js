@@ -119,6 +119,7 @@ export function toApp(page) {
     appliedOn: splitDate(read(p['Applied on'])).date, lastUpdate: splitDate(read(p['Last update'])).date,
     followUp: splitDate(read(p['Next follow-up'])).date, nextAction: read(p['Next action']) || '',
     jobUrl: read(p['Job URL']), notes: read(p.Notes) || '', remindersSent: sent(read(p['Reminders sent'])),
+    tier: read(p.Tier), socTier: read(p['SOC tier']), location: read(p.Location) || '', referral: read(p['Referral contact']) || '', cvVersion: read(p['CV version']) || '', sector: read(p.Sector) || '',
   };
 }
 export function appProps(a) {
@@ -220,6 +221,7 @@ export function notionStore(client, ds) {
       const pages = await client.queryAll(ds.networking, { filter: { or: [{ property: 'Status', status: { equals: 'Upcoming' } }, { property: 'Status', status: { equals: 'Attended' } }] } });
       return pages.map(toNet);
     },
+    async allNetworking() { return ds.networking ? (await client.queryAll(ds.networking)).map(toNet) : []; },
     async createNet(x) { return toNet(await client.create(ds.networking, netProps({ status: 'Attended', ...x }))); },
     async updateNet(id, patch) { return toNet(await client.update(id, netProps(patch))); },
     async trash(id) { await client.trash(id); },

@@ -48,7 +48,17 @@ Set `NOTION_NETWORKING_DS` to the Networking database to switch this on.
 
 - `/net <what happened>` (or a message starting with "met ..." / "ketemu ...") records who you met, what you talked about and what comes next. It updates the matching event row or creates one, sets a follow-up date (tomorrow unless you name one) and lists what to do next.
 - `/prep` shows the prep notes for every event on the next event day; `/prep bny` or "what should I ask at BNY" finds one by name.
-- `/followups` lists conversations still waiting for a follow-up; the morning digest reminds you on the day.
+- `/followups` ranks the conversations waiting for a follow-up and says why each matters now; the morning digest reminds you on the day.
+- `/people <name>` summarises one relationship from the log, with a state (New, Warm, Strong, Dormant) worked out each time.
+
+## Priorities across databases
+
+`src/priority.js` ranks tasks, applications, networking follow-ups and events by rule (due dates, stage, tier, follow-up age, people known at a company, calendar matches). No language model is involved, so the order is repeatable and each line states its reason.
+
+- `/today` and the digest open with up to three top priorities.
+- `/career` splits career work into urgent, important and what can wait.
+- `/app <company>` shows one application with its checks (no prep task, deadline while still on the wishlist, Tier 1 gone quiet, referral without a follow-up, a contact at the company).
+- The Sunday review ends with what matters next.
 
 ## Privacy
 
