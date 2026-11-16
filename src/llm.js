@@ -4,6 +4,9 @@ import { ServiceError } from './notion.js';
 import { PERSONA } from './persona.js';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
+// Node's fetch has no timeout of its own and can hang for minutes on a stuck connection,
+// so every Gemini call gets an explicit cap and fails fast instead of leaving the user waiting.
+const TIMEOUT_MS = 20_000;
 
 export function geminiClient({ key, model, dailyLimit }, fetchImpl = fetch, today = () => new Date().toISOString().slice(0, 10)) {
   let chosen = model || null;
@@ -12,7 +15,8 @@ export function geminiClient({ key, model, dailyLimit }, fetchImpl = fetch, toda
 
   async function pickModel() {
     if (chosen) return chosen;
-    const res = await fetchImpl(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': key } }).catch((e) => { throw new ServiceError('llm', 0, e.message); });
+    const res = await fetchImpl(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(TIMEOUT_MS) })
+      .catch((e) => { throw new ServiceError('llm', 0, e.name === 'TimeoutError' ? `timed out after ${TIMEOUT_MS / 1000}s listing models` : e.message); });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new ServiceError('llm', res.status, data.error?.message || 'model list failed');
     const names = (data.models || [])
@@ -36,10 +40,16 @@ export function geminiClient({ key, model, dailyLimit }, fetchImpl = fetch, toda
       generationConfig: json ? { responseMimeType: 'application/json', temperature: 0.1 } : { temperature: 0.6 },
     };
     let res;
+    const t0 = Date.now();
     try {
-      res = await fetchImpl(`${BASE}/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    } catch (e) { usage.lastError = e.message; throw new ServiceError('llm', 0, e.message); }
+      res = await fetchImpl(`${BASE}/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (e) {
+      const msg = e.name === 'TimeoutError' ? `timed out after ${TIMEOUT_MS / 1000}s calling Gemini` : e.message;
+      usage.lastError = msg;
+      throw new ServiceError('llm', 0, msg);
+    }
     const data = await res.json().catch(() => ({}));
+    console.log(`gemini ${m} ${res.status} ${Date.now() - t0}ms`);
     if (!res.ok) {
       if (res.status === 429) bump('quotaErrors');
       usage.lastError = data.error?.message || res.statusText;
