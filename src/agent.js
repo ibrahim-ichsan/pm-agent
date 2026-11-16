@@ -8,6 +8,7 @@ import { usageNote } from './llm.js';
 import { buildDigest, buildReview, parsePlan, agreedPlan, appsNeedingAttention } from './digest.js';
 import { readCalendars } from './calendar.js';
 import { docxText } from './docx.js';
+import { createNetworking, followUpLines } from './network.js';
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const UNDO_MS = 10 * 60 * 1000;
@@ -50,6 +51,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     return msg;
   }
   async function fail(err, ctx) { log.error?.(err); await say(explain(err, lastLang, ctx)); }
+  const net = createNetworking({ cfg, store, llm, say, btn, T, esc, now, fail });
 
   // ---------- entry points
   async function handleUpdate(u) {
@@ -73,6 +75,10 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     if (c) return handleCommand(c.cmd, c.arg);
     const lm = text.match(/^(?:please\s+)?(?:reply|answer|talk|speak)\s+in\s+(english|indonesian|bahasa)|^(?:pake|pakai|ganti)\s+bahasa\s+(inggris|indo(?:nesia)?)/i);
     if (lm) return setLang(/english|inggris/i.test(lm[0]) ? 'en' : 'id');
+    // Networking shortcuts in plain words: "met Aoife at BNY ..." logs it, "what should I ask at BNY" shows the prep.
+    const ask = text.match(/^(?:what (?:should|do|can) i ask|what to ask|apa (?:yang|yg) (?:mesti|harus|perlu|bisa) (?:gw|gue|aku|saya) tanya(?:in)?|prep(?:are)? (?:for|buat))\b[\s,:]*(?:at|di|for|buat|ke|to)?\s*([\s\S]*)$/i);
+    if (ask) return net.prep(ask[1].replace(/[?.!]+$/, '').replace(/\b(tomorrow|besok|today|hari ini|tonight|nanti)\b/gi, '').trim());
+    if (/^(?:i\s+)?(?:just\s+)?met\s|^(?:abis|barusan|tadi)?\s*ketemu\s/i.test(text)) return net.log(text);
     return capture(text);
   }
 
@@ -88,6 +94,9 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
       case 'plan': return startPlan(arg);
       case 'brief': return startBrief(arg);
       case 'shift': return logShift(arg);
+      case 'net': case 'met': return net.log(arg);
+      case 'prep': return net.prep(arg);
+      case 'followups': case 'followup': return net.followups();
       case 'usage': return say(llm.enabled ? usageNote(llm.usage(), lastLang) + (llm.model() ? `\nModel: ${llm.model()}` : '') : T('No language model key is set, so only commands and simple capture work.', 'Belum ada key model, jadi cuma command sama capture sederhana yang jalan.'));
       case 'lang': return setLang(['en', 'id', 'auto'].includes(arg) ? arg : null);
       case 'retry': return lastFailed ? capture(lastFailed) : say(T('Nothing to retry.', 'Nggak ada yang perlu diulang.'));
@@ -259,6 +268,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
       }
       if (p.type === 'brief') return handleBrief(p, m, text);
       if (p.type === 'plan') return handlePlan(p, m, text);
+      if (p.type === 'net') return net.log(text);
       if (p.type === 'event_date') {
         const d = readDate(text, n.date);
         if (!d.date) return say(T('No valid date found. Send the event again with a date.', 'Nggak ada tanggal yang valid. Kirim ulang event-nya pake tanggal.'));
@@ -547,6 +557,7 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
         case 'brief_for': return askBrief(a);
         case 'plan_for': return askPlan(a);
         case 'plan_to_cal': return planToCalendar(a.taskId, a.only);
+        case 'net_done': case 'net_thanks': case 'net_ask': return net.onAction(a);
         case 'doc_kind': return pickDocProject(a);
         case 'doc_for': return runDoc(a, { id: a.id, title: a.title, due: a.due });
         case 'doc_new': { const t0 = await store.createTask({ title: a.name, area: 'Coursework' }); await say(T(`Created the project task "${esc(t0.title)}" in Notion.`, `Task project "${esc(t0.title)}" udah dibikin di Notion.`)); return runDoc(a, { id: t0.id, title: t0.title, due: t0.due }); }
@@ -620,7 +631,8 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
   async function gather(from, to) {
     const { events, failures } = await readCalendars(cal, cfg.google.readCalendars, from, to);
     const [tasks, apps, roadmap] = await Promise.all([store.openTasks(), store.openApps(), store.roadmap().catch(() => [])]);
-    return { events, calFailures: failures, tasks, apps, roadmap };
+    const networking = store.networking ? await store.networking().catch(() => []) : [];
+    return { events, calFailures: failures, tasks, apps, roadmap, followUps: followUpLines(networking, from) };
   }
   async function sendDigest({ manual = false } = {}) {
     const n = now();
@@ -671,6 +683,7 @@ Commands
 /done tick things off · /add force a task
 /brief send a project brief · /plan save the agreed timeline
 /shift log a part-time shift · /usage model usage
+/net log who you met · /prep what to ask next · /followups
 /lang en | id | auto · /retry last failed capture
 
 Files: send meeting notes or a project brief as PDF or Word (.docx) and I ask which project it is for.`,
@@ -686,6 +699,7 @@ Command
 /done centang yang kelar · /add paksa jadi task
 /brief kirim brief project · /plan simpen timeline final
 /shift catat shift part-time · /usage pemakaian model
+/net catat ketemu siapa · /prep mau nanya apa · /followups
 /lang en | id | auto · /retry ulang capture yang gagal
 
 File: kirim notulen meeting atau brief project (PDF atau Word .docx), nanti gue tanya buat project yang mana.`,

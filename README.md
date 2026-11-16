@@ -42,6 +42,14 @@ All keys and IDs are config vars. The repo holds none.
 4. **Google Calendar**: in Google Cloud, enable the Google Calendar API, create a service account, add a JSON key and paste the whole file into `GOOGLE_SERVICE_ACCOUNT_JSON`. Share each calendar with the service account's email ("Make changes to events"). List the calendars in `CALENDAR_IDS`.
 5. **Heroku**: create an app, set the config vars, deploy this repo, then scale `worker=1` (the bot needs no web dyno).
 
+## Networking log
+
+Set `NOTION_NETWORKING_DS` to the Networking database to switch this on.
+
+- `/net <what happened>` (or a message starting with "met ..." / "ketemu ...") records who you met, what you talked about and what comes next. It updates the matching event row or creates one, sets a follow-up date (tomorrow unless you name one) and lists what to do next.
+- `/prep` shows the prep notes for every event on the next event day; `/prep bny` or "what should I ask at BNY" finds one by name.
+- `/followups` lists conversations still waiting for a follow-up; the morning digest reminds you on the day.
+
 ## Privacy
 
 Message text, and any project brief you send, go to the language model provider you configured (Groq and/or Google Gemini) to be understood. Notion and calendar content is read for each reply and not stored by the bot.

@@ -57,6 +57,7 @@ export function buildDigest(d) {
   const road = d.roadmap.filter((r) => r.week && r.week >= mon && r.week <= sun && r.status !== 'Done');
   blocks.push(block(L(lang, "This week's roadmap", 'Roadmap minggu ini'), road.map((r) => `• ${esc(r.title)}${r.priority ? ` (${r.priority})` : ''}`), lang));
   // Applications
+  if (d.followUps?.length) blocks.push(block(L(lang, 'Networking follow-ups', 'Follow-up networking'), d.followUps.map((f) => `• ${esc(f.title)}${f.late ? L(lang, ' (late)', ' (telat)') : ''}`).concat(L(lang, '/followups to tick them off', '/followups buat nyentang')), lang));
   const att = appsNeedingAttention(d.apps, today, d.idleDays);
   const appLines = att.dated.slice(0, 5).map((x) => `• ${esc(x.a.title)}: ${x.text}`);
   if (att.dated.length > 5) appLines.push(L(lang, `…and ${att.dated.length - 5} more with a date this week`, `…dan ${att.dated.length - 5} lagi yang ada tanggalnya minggu ini`));

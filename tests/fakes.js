@@ -10,7 +10,7 @@ export const cfg = {
 export function fakeStore(seed = {}) {
   let n = 0;
   const id = () => `id${++n}`;
-  const s = { tasks: seed.tasks || [], apps: seed.apps || [], roadmap: seed.roadmap || [], shifts: [], state: {}, trashed: [], calls: [] };
+  const s = { tasks: seed.tasks || [], apps: seed.apps || [], roadmap: seed.roadmap || [], net: seed.net || [], shifts: [], state: {}, trashed: [], calls: [] };
   const created = (clockIso) => clockIso || '2026-11-01T00:00:00.000Z';
   s.api = {
     openTasks: async () => s.tasks.filter((t) => t.status !== 'Done' && !s.trashed.includes(t.id)).map((t) => ({ ...t })),
@@ -23,6 +23,9 @@ export function fakeStore(seed = {}) {
     updateApp: async (i, p) => { const x = s.apps.find((t) => t.id === i); Object.assign(x, p); s.calls.push(['updateApp', i, p]); return { ...x }; },
     setRoadmapDone: async (r) => { s.roadmap.find((x) => x.id === r.id).status = 'Done'; s.calls.push(['roadDone', r.id]); },
     createShift: async (x) => { s.shifts.push(x); },
+    networking: async () => s.net.filter((r) => ['Upcoming', 'Attended'].includes(r.status)).map((r) => ({ ...r })),
+    createNet: async (x) => { const r = { kind: 'net', id: id(), status: 'Attended', people: '', topics: '', takeaways: '', nextSteps: '', plays: [], prep: '', org: '', ...x }; s.net.push(r); return { ...r }; },
+    updateNet: async (i, p) => { const r = s.net.find((x) => x.id === i); Object.assign(r, p); return { ...r }; },
     trash: async (i) => { s.trashed.push(i); s.calls.push(['trash', i]); },
     getState: async (k) => s.state[k] ?? null,
     setState: async (k, v) => { s.state[k] = v; },

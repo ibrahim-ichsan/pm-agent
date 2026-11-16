@@ -52,6 +52,7 @@ export function read(prop) {
     case 'rich_text': return plain(prop.rich_text);
     case 'select': return prop.select?.name ?? null;
     case 'status': return prop.status?.name ?? null;
+    case 'multi_select': return (prop.multi_select || []).map((o) => o.name);
     case 'url': return prop.url ?? null;
     case 'number': return prop.number ?? null;
     case 'created_time': return prop.created_time;
@@ -75,6 +76,7 @@ export const w = {
   text: (s) => ({ rich_text: s ? [{ text: { content: String(s).slice(0, 2000) } }] : [] }),
   select: (s) => ({ select: s ? { name: s } : null }),
   status: (s) => ({ status: { name: s } }),
+  multi: (list) => ({ multi_select: (list || []).map((name) => ({ name })) }),
   url: (s) => ({ url: s || null }),
   number: (n) => ({ number: n ?? null }),
   date: (date, time) => ({ date: date ? (time ? { start: `${date}T${time}:00`, time_zone: 'Europe/Dublin' } : { start: date }) : null }),
@@ -137,6 +139,31 @@ export function appProps(a) {
   return out;
 }
 
+// Networking log: one row per event or conversation.
+export function toNet(page) {
+  const p = page.properties;
+  const d = splitDate(read(p.Date));
+  return {
+    kind: 'net', id: page.id, url: page.url, title: read(p.Event) || '(untitled)', status: read(p.Status) || 'Upcoming',
+    date: d.date, time: d.time, type: read(p.Type), track: read(p.Track), org: read(p.Organisation) || '',
+    people: read(p['People met']) || '', topics: read(p.Topics) || '', takeaways: read(p.Takeaways) || '',
+    nextSteps: read(p['Next steps']) || '', plays: read(p['Next play']) || [], followUp: splitDate(read(p['Follow-up by'])).date,
+    prep: read(p.Prep) || '', link: read(p.Link),
+  };
+}
+export function netProps(x) {
+  const out = {};
+  if ('title' in x) out.Event = w.title(x.title);
+  if ('status' in x) out.Status = w.status(x.status);
+  if ('date' in x) out.Date = w.date(x.date, x.time);
+  if ('type' in x) out.Type = w.select(x.type);
+  if ('track' in x) out.Track = w.select(x.track);
+  if ('plays' in x) out['Next play'] = w.multi(x.plays);
+  if ('followUp' in x) out['Follow-up by'] = w.date(x.followUp);
+  for (const [k, n] of [['org', 'Organisation'], ['people', 'People met'], ['topics', 'Topics'], ['takeaways', 'Takeaways'], ['nextSteps', 'Next steps'], ['prep', 'Prep']]) if (k in x) out[n] = w.text(x[k]);
+  return out;
+}
+
 // The CreditFlow Tracker: read generously, write only Status.
 export function toRoadmap(page) {
   const p = page.properties;
@@ -186,6 +213,15 @@ export function notionStore(client, ds) {
     async createShift(x) {
       await client.create(ds.shifts, { Shift: w.title(x.title), Employer: w.text(x.employer), Date: w.date(x.date), Hours: w.number(x.hours), 'Rate EUR': w.number(x.rate) });
     },
+    networkingReady: !!ds.networking,
+    // Rows still in play: upcoming events and conversations waiting for a follow-up.
+    async networking() {
+      if (!ds.networking) return [];
+      const pages = await client.queryAll(ds.networking, { filter: { or: [{ property: 'Status', status: { equals: 'Upcoming' } }, { property: 'Status', status: { equals: 'Attended' } }] } });
+      return pages.map(toNet);
+    },
+    async createNet(x) { return toNet(await client.create(ds.networking, netProps({ status: 'Attended', ...x }))); },
+    async updateNet(id, patch) { return toNet(await client.update(id, netProps(patch))); },
     async trash(id) { await client.trash(id); },
     async getState(key) { await loadState(); return state.get(key)?.value ?? null; },
     async setState(key, value) {

@@ -7,6 +7,7 @@ export function loadConfig(e = env) {
   return {
     telegramToken: e.TELEGRAM_TOKEN || '',
     ownerId: Number(e.OWNER_TELEGRAM_ID || 0),
+    ownerBio: e.OWNER_BIO || '', // optional: two lines about the owner, used when drafting messages and questions
     ownerNames: e.OWNER_NAMES || '', // how the owner is named in meeting notes, e.g. "Ibrahim, Ichsan"
     notionToken: e.NOTION_TOKEN || '',
     notion: {
@@ -15,6 +16,7 @@ export function loadConfig(e = env) {
       shifts: e.NOTION_SHIFTS_DS || '',
       state: e.NOTION_STATE_DS || '',
       roadmap: e.NOTION_ROADMAP_DS || '',
+      networking: e.NOTION_NETWORKING_DS || '', // optional: the Networking database
     },
     // Any OpenAI-compatible provider. GROQ_API_KEY is a shortcut for Groq's free tier.
     llm: {

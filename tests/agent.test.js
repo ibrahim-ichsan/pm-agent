@@ -347,3 +347,60 @@ test('Provider chain: first provider answers text, falls back when it fails, PDF
   const none = llmChain([mk('Groq', false, () => false)]);
   await assert.rejects(() => none.generate([{ inline_data: {} }]), /reads PDFs/);
 });
+
+const NET = () => [
+  { kind: 'net', id: 'n1', title: 'Meet the Firm – BNY Dublin (participation confirmed)', org: 'BNY', status: 'Upcoming', date: '2026-11-17', time: '14:30', prep: 'Bring photo ID. Ask analysts what surprised them.', people: '', topics: '', takeaways: '', nextSteps: '', plays: [] },
+  { kind: 'net', id: 'n2', title: 'Route to the Boardroom with EY & WTW', org: 'EY, WTW', status: 'Upcoming', date: '2026-11-17', time: '08:00', prep: 'Leave with two names.', people: '', topics: '', takeaways: '', nextSteps: '', plays: [] },
+  { kind: 'net', id: 'n3', title: 'PMI Ireland Student Club Launch', org: 'PMI', status: 'Upcoming', date: '2026-11-18', time: '18:00', prep: 'Find the Deloitte speaker.', people: '', topics: '', takeaways: '', nextSteps: '', plays: [] },
+];
+
+test('/prep shows every event on the next event day; a plain question finds one by name', async () => {
+  const { tg, agent } = setup({ store: { net: NET() } });
+  await agent.handleUpdate(msg('/prep'));
+  const shown = tg.sent.map((m) => m.text).join('\n');
+  assert.match(shown, /Route to the Boardroom/);
+  assert.match(shown, /Bring photo ID/);
+  assert.doesNotMatch(shown, /PMI Ireland/);
+  tg.sent.length = 0;
+  await agent.handleUpdate(msg('what should I ask at BNY tomorrow?'));
+  assert.match(tg.last().text, /Meet the Firm/);
+  assert.match(tg.last().text, /Ask analysts what surprised them/);
+});
+
+test('/net with the model down: matches the event, files the text, sets a follow-up for tomorrow, says what to do next', async () => {
+  const { store, tg, agent } = setup({ llmDown: true, store: { net: NET() } });
+  await agent.handleUpdate(msg('/net BNY Meet the Firm: met Aoife, analyst in risk. Talked about the grad programme. She said email her next week'));
+  const row = store.net.find((r) => r.id === 'n1');
+  assert.equal(row.status, 'Attended');
+  assert.equal(row.followUp, '2026-11-17');
+  assert.match(row.topics, /met Aoife/);
+  assert.equal(store.net.length, 3, 'no duplicate row');
+  assert.match(tg.last().text, /Added to "Meet the Firm/);
+  assert.match(tg.last().text, /language model is not reachable/);
+  assert.match(tg.last().text, /What to do next/);
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Followed up/)));
+  assert.equal(row.status, 'Followed up');
+});
+
+test('/net with the model: fields are split, a thank-you play is set, an unknown event becomes a new row', async () => {
+  const { store, tg, agent } = setup({ store: { net: NET() } });
+  PARSES['Coffee with Niamh from AIB credit risk, she suggested I read the IRB guide'] = { event: 'Coffee with Niamh', organisation: 'AIB', people: 'Niamh (credit risk, AIB)', topics: 'IRB models', takeaways: 'Read the IRB guide', next_steps: '', follow_up_text: 'friday', plays: ['Learn'] };
+  await agent.handleUpdate(msg('/net Coffee with Niamh from AIB credit risk, she suggested I read the IRB guide'));
+  const row = store.net[3];
+  assert.equal(row.title, 'Coffee with Niamh');
+  assert.equal(row.people, 'Niamh (credit risk, AIB)');
+  assert.equal(row.followUp, '2026-11-20');
+  assert.deepEqual(row.plays, ['Learn']);
+  assert.match(tg.last().text, /Within 24h/);
+  assert.ok(dataOf(tg.last(), /Draft the thank-you/));
+});
+
+test('/followups lists conversations waiting, and the digest reminds on the day', async () => {
+  const net = NET(); Object.assign(net[0], { status: 'Attended', followUp: '2026-11-16', nextSteps: 'Email Aoife' });
+  const { tg, agent } = setup({ store: { net } });
+  await agent.handleUpdate(msg('/followups'));
+  assert.match(tg.last().text, /Waiting for a follow-up \(1\)/);
+  assert.match(tg.last().text, /Email Aoife/);
+  await agent.sendDigest({ manual: true });
+  assert.match(tg.last().text, /Networking follow-ups/);
+});
