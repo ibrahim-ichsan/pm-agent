@@ -479,3 +479,37 @@ test('Owner context is optional and layered in only when set', async () => {
   assert.equal(ownerContext({}), '');
   assert.equal(ownerContext({ ownerBio: 'B', ownerGoals: 'G' }), 'About the owner: B\nOwner\'s goals: G\n');
 });
+
+test('Reply to /career in plain words: rows are updated after one confirmation, no task is created, waiting ones leave the list', async () => {
+  const apps = [
+    { kind: 'app', id: 'j1', title: 'JPMorgan Chase — BPM Senior Associate', company: 'JPMorgan Chase', stage: 'Online test', tier: 'Tier 1', due: '2026-11-18' },
+    { kind: 'app', id: 'j2', title: 'JPMorgan Chase — Global Payments Analyst', company: 'JPMorgan Chase', stage: 'Online test', tier: 'Tier 1', due: '2026-11-18' },
+    { kind: 'app', id: 'a1', title: 'Aon — Data & Analytics - Graduate', company: 'Aon', stage: 'Online test', tier: 'Tier 2', due: '2026-11-17' },
+    { kind: 'app', id: 'c1', title: 'Coca Cola HBC — Finance Graduate Programme 2027', company: 'Coca Cola HBC', stage: 'Online test', lastUpdate: '2026-11-05' },
+    { kind: 'app', id: 'e1', title: 'ESB — IT Graduate Development Programme', company: 'ESB', stage: 'Interview', lastUpdate: '2026-10-23' },
+  ];
+  const { store, tg, agent } = setup({ store: { apps } });
+  await agent.handleUpdate(msg('/career'));
+  assert.match(tg.last().text, /Urgent[\s\S]*1\. JPMorgan Chase — BPM[\s\S]*2\. JPMorgan Chase — Global[\s\S]*3\. Aon — Data &amp; Analytics/);
+  assert.match(tg.last().text, /Important[\s\S]*Coca Cola HBC[\s\S]*no date on record, last update Thu 5 Nov/);
+  assert.doesNotMatch(tg.last().text, /<company>/);
+  await agent.handleUpdate(msg('yang Urgent 1,2 udah gaditerima gw. Urgent 3 dan semua di Important udah gw lakuin tinggal nunggu hasil'));
+  assert.equal(store.tasks.length, 0, 'not filed as a task');
+  assert.match(tg.last().text, /Update 5 ini\?[\s\S]*BPM Senior Associate: → Rejected[\s\S]*Aon[\s\S]*nunggu hasil[\s\S]*ESB/);
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Konfirmasi 5/)));
+  assert.deepEqual(store.apps.map((a) => a.stage), ['Rejected', 'Rejected', 'Online test', 'Online test', 'Interview']);
+  assert.deepEqual(store.apps.slice(2).map((a) => a.nextAction), ['Waiting for result', 'Waiting for result', 'Waiting for result']);
+  await agent.handleUpdate(msg('/career'));
+  assert.doesNotMatch(tg.last().text, /Aon|Coca Cola|ESB|JPMorgan/);
+  assert.match(tg.last().text, /Waiting on a result: 3 applications/);
+});
+
+test('List replies are parsed by section, numbers, ranges and "all"', async () => {
+  const { parseListReply } = await import('../src/career.js');
+  assert.deepEqual(parseListReply('urgent 1-3 rejected; important 2 done, waiting'), [
+    { section: 'urgent', index: 0, status: 'Rejected' }, { section: 'urgent', index: 1, status: 'Rejected' }, { section: 'urgent', index: 2, status: 'Rejected' },
+    { section: 'important', index: 1, status: 'waiting' }]);
+  assert.deepEqual(parseListReply('semua di important udah gw kerjain'), [{ section: 'important', all: true, status: 'waiting' }]);
+  assert.deepEqual(parseListReply('buy printer paper friday'), []);
+  assert.deepEqual(parseListReply('this is urgent, finish the report'), []);
+});

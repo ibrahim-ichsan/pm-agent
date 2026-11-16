@@ -19,7 +19,7 @@ export function telegramClient(token, fetchImpl = fetch) {
       try { return await call('sendMessage', body); }
       catch (e) {
         // If the HTML is rejected, send it as plain text rather than not at all.
-        if (e.status === 400 && /parse/i.test(e.message)) { delete body.parse_mode; body.text = text.replace(/<[^>]+>/g, ''); return call('sendMessage', body); }
+        if (e.status === 400 && /parse/i.test(e.message)) { delete body.parse_mode; body.text = text.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); return call('sendMessage', body); }
         throw e;
       }
     },

@@ -53,6 +53,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
   }
   async function fail(err, ctx) { log.error?.(err); await say(explain(err, lastLang, ctx)); }
   const net = createNetworking({ cfg, store, llm, say, btn, T, esc, now, fail });
+  const career = createCareer({ cfg, store, say, btn, T, esc, now, fail, gather: (...a) => gather(...a) });
 
   // ---------- entry points
   async function handleUpdate(u) {
@@ -76,6 +77,8 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     if (c) return handleCommand(c.cmd, c.arg);
     const lm = text.match(/^(?:please\s+)?(?:reply|answer|talk|speak)\s+in\s+(english|indonesian|bahasa)|^(?:pake|pakai|ganti)\s+bahasa\s+(inggris|indo(?:nesia)?)/i);
     if (lm) return setLang(/english|inggris/i.test(lm[0]) ? 'en' : 'id');
+    // A reply about the last /career list ("urgent 1 and 2 rejected, important all waiting") updates those rows, not a new task.
+    if (await career.refer(text) !== false) return;
     // Networking shortcuts in plain words: "met Aoife at BNY ..." logs it, "what should I ask at BNY" shows the prep.
     const ask = text.match(/^(?:what (?:should|do|can) i ask|what to ask|apa (?:yang|yg) (?:mesti|harus|perlu|bisa) (?:gw|gue|aku|saya) tanya(?:in)?|prep(?:are)? (?:for|buat))\b[\s,:]*(?:at|di|for|buat|ke|to)?\s*([\s\S]*)$/i);
     if (ask) return net.prep(ask[1].replace(/[?.!]+$/, '').replace(/\b(tomorrow|besok|today|hari ini|tonight|nanti)\b/gi, '').trim());
@@ -565,6 +568,7 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
         case 'plan_to_cal': return planToCalendar(a.taskId, a.only);
         case 'net_done': case 'net_thanks': case 'net_ask': return net.onAction(a);
         case 'app_show': return career.appDetail(a.q);
+        case 'career_apply': return career.apply(a.items);
         case 'make_task': { const t0 = await store.createTask({ title: a.title, area: 'Job search', priority: 'Must', due: a.due || null }); return say(T(`Created the task "${esc(t0.title)}"${t0.due ? `, due ${pretty(t0.due)}` : ''}.`, `Task "${esc(t0.title)}" udah dibikin${t0.due ? `, due ${pretty(t0.due)}` : ''}.`)); }
         case 'doc_kind': return pickDocProject(a);
         case 'doc_for': return runDoc(a, { id: a.id, title: a.title, due: a.due });
@@ -669,7 +673,6 @@ Include filming or recording sessions as milestones. Copy dates as written; neve
     await say(`⏰ ${label} ${when} (${pretty(item.due, item.time)}): <b>${esc(item.title)}</b>`, { buttons });
   }
 
-  const career = createCareer({ cfg, store, say, btn, T, esc, now, fail, gather });
   return { handleUpdate, sendDigest, sendReview, sendReminder, capture, _pending: pending, _actions: actions, lang: () => lastLang };
 }
 
@@ -693,7 +696,7 @@ Commands
 /brief send a project brief · /plan save the agreed timeline
 /shift log a part-time shift · /usage model usage
 /net log who you met · /prep what to ask next · /followups
-/career what matters now · /app <company> · /people <name>
+/career what matters now · /app company · /people name
 /lang en | id | auto · /retry last failed capture
 
 Files: send meeting notes or a project brief as PDF or Word (.docx) and I ask which project it is for.`,
@@ -710,7 +713,7 @@ Command
 /brief kirim brief project · /plan simpen timeline final
 /shift catat shift part-time · /usage pemakaian model
 /net catat ketemu siapa · /prep mau nanya apa · /followups
-/career yang penting sekarang · /app <company> · /people <nama>
+/career yang penting sekarang · /app company · /people nama
 /lang en | id | auto · /retry ulang capture yang gagal
 
 File: kirim notulen meeting atau brief project (PDF atau Word .docx), nanti gue tanya buat project yang mana.`,

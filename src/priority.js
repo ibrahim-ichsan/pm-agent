@@ -10,6 +10,9 @@ export const SIGNALS = [
   ['hiring mentioned', /\bhiring\b|open roles?|vacanc|\bopenings?\b|lowongan|recruiting now/i],
 ];
 export const signalsOf = (row) => { const t = `${row.people} ${row.topics} ${row.takeaways} ${row.nextSteps}`; return SIGNALS.filter(([, re]) => re.test(t)).map(([name]) => name); };
+// The owner has done their part and is waiting for the other side. Kept in the existing "Next action" field.
+export const WAITING = /\b(wait(ing)?|await(ing)?|nunggu|menunggu|pending result)\b/i;
+export const isWaiting = (a) => WAITING.test(a.nextAction || '');
 const TIER = { 'Tier 1': 30, 'Tier 2': 15, 'Tier 3': 0 };
 const hours = (e) => (e.allDay || !e.start || !e.end ? 0 : Math.max(0, (Number(e.end.slice(0, 2)) * 60 + Number(e.end.slice(3)) - Number(e.start.slice(0, 2)) * 60 - Number(e.start.slice(3))) / 60));
 
@@ -27,9 +30,11 @@ export function appChecks(a, { tasks = [], net = [], events = [], today, idleDay
   const mentions = (s) => c.length >= 3 && norm(s).includes(c);
   const prepTask = tasks.find((t) => mentions(t.title) && /prep|interview|test|assessment|siap/i.test(t.title));
   const left = a.due ? diffDays(a.due, today) : null;
-  if (a.stage === 'Interview' && !prepTask) out.push('Interview stage but no prep task exists.');
+  const waiting = isWaiting(a);
+  if (waiting) out.push('Marked as waiting for a result.');
+  if (a.stage === 'Interview' && !prepTask && !waiting) out.push('Interview stage but no prep task exists.');
   if (a.stage === 'Online test' && left !== null && left >= 0 && left <= 1) out.push(`Online test deadline is ${left === 0 ? 'today' : 'tomorrow'}.`);
-  if (a.stage === 'Online test' && !prepTask && (left === null || left > 1)) out.push('Online test stage but no task for it.');
+  if (a.stage === 'Online test' && !prepTask && !waiting && (left === null || left > 1)) out.push('Online test stage but no task for it.');
   if (a.stage === 'Wishlist' && left !== null && left >= 0) out.push(`Deadline ${pretty(a.due)} and still on the wishlist: apply or drop it.`);
   const since = a.lastUpdate || a.appliedOn;
   if (a.tier === 'Tier 1' && a.stage === 'Applied' && since && diffDays(today, since) >= idleDays) out.push(`Tier 1 with no change for ${diffDays(today, since)} days.`);
@@ -59,13 +64,23 @@ export function rank(d, { scope = 'all', horizon = 0 } = {}) {
     if (t.area === 'Coursework' && s) { s += 15; why.push('Coursework'); }
     if (t.area === 'Job search' && s) s += 10;
     if (!t.due && t.priority !== 'Must') s = 0;
-    push('task', t.title, s, why);
+    push('task', t.title, s, why, { id: t.id });
   }
   for (const a of d.apps || []) {
     let s = 0; const why = [];
     const left = a.due ? diffDays(a.due, today) : null;
     const tier = TIER[a.tier] || 0;
-    if (['Interview', 'Online test'].includes(a.stage)) { s += 70; why.push(a.stage.toLowerCase()); }
+    const since = a.lastUpdate || a.appliedOn;
+    if (isWaiting(a)) {
+      // Nothing to do until they answer. Surfaces again only when it has been quiet for a long time.
+      const quiet = since ? diffDays(today, since) : 0;
+      if (quiet >= (d.idleDays || 14)) push('app', a.title, 30 + tier, [a.tier, `waiting ${quiet} days for a result`, 'a polite nudge is reasonable'], { id: a.id, waiting: true });
+      continue;
+    }
+    const active = ['Interview', 'Online test'].includes(a.stage);
+    const dated = left !== null && left >= 0;
+    // A stage with a date is urgent. A stage with no date on record may already be done, so it ranks lower and says so.
+    if (active) { s += dated ? 70 : 40; why.push(a.stage.toLowerCase()); if (!dated) why.push(since ? `no date on record, last update ${pretty(since)}` : 'no date on record'); }
     if (left !== null && left >= 0) {
       if (left <= 1) { s += left === 0 ? 60 : 50; why.push(`deadline ${left === 0 ? 'today' : 'tomorrow'}`); }
       else if (left <= Math.max(3, horizon)) { s += 30; why.push(`deadline ${pretty(a.due)}`); }
@@ -73,7 +88,8 @@ export function rank(d, { scope = 'all', horizon = 0 } = {}) {
     }
     if (a.followUp && diffDays(a.followUp, today) <= 0 && diffDays(a.followUp, today) >= -7) { s += 25; why.push('follow-up due'); }
     const checks = s || tier ? appChecks(a, d) : [];
-    if (checks.some((c) => /no prep task|no task for it/.test(c))) { s += 10; why.push('no prep task yet'); }
+    const cal0 = checks.find((c) => c.startsWith('On the calendar'));
+    if ((dated || cal0) && checks.some((c) => /no prep task|no task for it/.test(c))) { s += 10; why.push('no prep task yet'); }
     const cal = checks.find((c) => c.startsWith('On the calendar'));
     if (cal) { s += 40; why.push(cal.replace('On the calendar: ', '').replace(/\.$/, '')); }
     if (checks.some((c) => c.startsWith('You know someone'))) why.push('you know someone there');

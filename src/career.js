@@ -1,17 +1,47 @@
 // Career views that read across Applications, Networking, Tasks and the calendar:
 // /career (what to do now), /app <name> (one application with checks), /people <name> (one relationship).
 import { pretty, addDays } from './dates.js';
-import { rank, appChecks, contactsAt, relationship, signalsOf } from './priority.js';
+import { rank, appChecks, contactsAt, relationship, signalsOf, isWaiting } from './priority.js';
 import { resolveApp, similarity } from './parse.js';
 
+const SECTION = /(urgent|mendesak|important|penting)/gi;
+const STATUS = [
+  ['Rejected', /\b(rejected|reject|rejection|ditolak|tolak|gagal|unsuccessful|not accepted|(?:ga|gak|nggak|ngga|enggak|tidak|tdk)\s*k?\s*diterima|gaditerima)\b/i],
+  ['Withdrawn', /\b(withdrawn|withdrew|withdraw|mundur)\b/i],
+  ['waiting', /\b(nunggu|menunggu|tunggu|waiting|wait|pending|done|completed|submitted|selesai|kelar|udah\s+(?:gw\s+|gue\s+|aku\s+|saya\s+)?(?:lakuin|kerjain|dikerjain|submit)|sudah\s+(?:di)?kerjakan)\b/i],
+];
+// "Urgent 1,2,3 rejected. Urgent 4 and everything in Important done, waiting" -> [{ section, index|all, status }]
+export function parseListReply(text) {
+  const out = [];
+  for (const clause of text.split(/[.;\n]+/)) {
+    const status = (STATUS.find(([, re]) => re.test(clause)) || [])[0];
+    const marks = [...clause.matchAll(SECTION)];
+    if (!status || !marks.length) continue;
+    marks.forEach((m, i) => {
+      const section = /urgent|mendesak/i.test(m[0]) ? 'urgent' : 'important';
+      const after = clause.slice(m.index + m[0].length, i + 1 < marks.length ? marks[i + 1].index : clause.length);
+      const nums = [];
+      // Numbers count only while they directly follow the section word: "Urgent 1, 2 and 4", "urgent 1-3".
+      const lead = (after.match(/^[\s:#]*((?:\d+\s*(?:[-–]\s*\d+)?\s*(?:,|&|\+|dan|and|sama)?\s*)+)/i) || [])[1] || '';
+      for (const part of lead.matchAll(/(\d+)\s*(?:[-–]\s*(\d+))?/g)) { const a = Number(part[1]); const b = Number(part[2] || part[1]); for (let k = a; k <= b && k < a + 20; k++) nums.push(k); }
+      if (nums.length) for (const k of nums) out.push({ section, index: k - 1, status });
+      else out.push({ section, all: true, status });
+    });
+  }
+  return out;
+}
+
 export function createCareer({ cfg, store, say, btn, T, esc, now, fail, gather }) {
+  let last = null; // the list shown by the latest /career, so a reply can point at "urgent 2"
   async function career() {
     const n = now();
     let d;
     try { d = await gather(n.date, addDays(n.date, 8)); } catch (e) { return fail(e); }
     const all = rank({ ...d, today: n.date, idleDays: cfg.followUpIdleDays }, { scope: 'career', horizon: 7 });
-    const urgent = all.filter((x) => x.score >= 90).slice(0, 4);
-    const important = all.filter((x) => x.score >= 45 && x.score < 90).slice(0, 4);
+    const urgent = all.filter((x) => x.score >= 90).slice(0, 5);
+    const important = all.filter((x) => x.score >= 40 && x.score < 90).slice(0, 5);
+    const waiting = d.apps.filter(isWaiting);
+    last = { urgent, important, at: Date.now() };
     // Things that look like work but can wait: undated job-search tasks and quiet lower-tier applications.
     const wait = [
       ...d.tasks.filter((t) => t.area === 'Job search' && !t.due && t.priority !== 'Must').slice(0, 2).map((t) => `${esc(t.title)} — ${T('no date, not a Must', 'tanpa tanggal, bukan Must')}`),
@@ -23,7 +53,47 @@ export function createCareer({ cfg, store, say, btn, T, esc, now, fail, gather }
     sec(T('Important', 'Penting'), important);
     if (wait.length) lines.push('', `<b>${T('Can wait: skip these this week', 'Bisa nunggu: lewatin minggu ini')}</b>`, ...wait.map((w) => `• ${w}`));
     if (!urgent.length && !important.length) lines.push('', T('Nothing career-related needs action in the next 7 days. Use the time for coursework or one outreach message.', 'Nggak ada urusan karier yang perlu dikerjain 7 hari ke depan. Pake waktunya buat kuliah atau satu pesan outreach.'));
-    lines.push('', T('Ranked by rule: deadlines, stage, tier, follow-up dates, people you know. /app <company> for detail.', 'Diurutin pake aturan: deadline, stage, tier, tanggal follow-up, orang yang lo kenal. /app <company> buat detail.'));
+    if (waiting.length) lines.push('', T(`Waiting on a result: ${waiting.length} application${waiting.length > 1 ? 's' : ''}. Nothing to do on those.`, `Lagi nunggu hasil: ${waiting.length} lamaran. Nggak ada yang perlu dikerjain.`));
+    if (urgent.length || important.length) lines.push('', T('Already dealt with some? Tell me in plain words, e.g. "urgent 1 and 2 rejected, important all done, waiting".', 'Udah ada yang beres? Bilang aja, misal "urgent 1 sama 2 ditolak, important semua udah, tinggal nunggu".'));
+    lines.push('', T('Ranked by rule: deadlines, stage, tier, follow-up dates, people you know. /app company for detail.', 'Diurutin pake aturan: deadline, stage, tier, tanggal follow-up, orang yang lo kenal. /app company buat detail.'));
+    return say(lines.join('\n'));
+  }
+
+  // A reply that points at the last /career list. Returns false when the message is not one.
+  async function refer(text) {
+    if (!last || Date.now() - last.at > 6 * 3600 * 1000) return false;
+    const refs = parseListReply(text);
+    if (!refs.length) return false;
+    const items = []; const seen = new Set();
+    for (const r of refs) {
+      const list = last[r.section] || [];
+      for (const x of r.all ? list : [list[r.index]].filter(Boolean)) {
+        if (seen.has(x.id)) continue; seen.add(x.id);
+        if (x.kind === 'app') items.push({ kind: 'app', id: x.id, title: x.title, op: r.status });
+        else if (r.status === 'waiting' && x.kind === 'task') items.push({ kind: 'task', id: x.id, title: x.title, op: 'done' });
+        else if (r.status === 'waiting' && x.kind === 'net') items.push({ kind: 'net', id: x.id, title: x.title, op: 'followed' });
+      }
+    }
+    if (!items.length) return say(T('Those numbers are not on the last /career list. Send /career again and point at that one.', 'Nomor itu nggak ada di daftar /career terakhir. Kirim /career lagi, terus tunjuk dari situ.'));
+    const label = (x) => (x.op === 'waiting' ? T('done, waiting for the result', 'udah, tinggal nunggu hasil') : x.op === 'done' ? T('mark Done', 'tandain Done') : x.op === 'followed' ? T('mark as followed up', 'tandain udah follow-up') : `→ ${x.op}`);
+    return say([T(`Update these ${items.length}?`, `Update ${items.length} ini?`), ...items.map((x) => `• ${esc(x.title)}: ${label(x)}`), '', T('Waiting ones leave the priority lists until they have been quiet for 14 days.', 'Yang nunggu hasil keluar dari daftar prioritas sampai 14 hari nggak ada kabar.')].join('\n'),
+      { buttons: [btn(T(`Confirm all ${items.length}`, `Konfirmasi ${items.length}-nya`), { type: 'career_apply', items }), btn(T('Cancel', 'Batal'), { type: 'cancel' })] });
+  }
+  async function apply(items) {
+    const n = now(); const ok = []; const bad = [];
+    for (const x of items) {
+      try {
+        if (x.kind === 'app' && x.op === 'waiting') await store.updateApp(x.id, { nextAction: 'Waiting for result', lastUpdate: n.date });
+        else if (x.kind === 'app') await store.updateApp(x.id, { stage: x.op, lastUpdate: n.date, followUp: null });
+        else if (x.kind === 'task') await store.updateTask(x.id, { status: 'Done' });
+        else await store.updateNet(x.id, { status: 'Followed up' });
+        ok.push(x);
+      } catch (e) { bad.push(x); }
+    }
+    last = null;
+    const lines = [T(`Updated ${ok.length} of ${items.length} in Notion.`, `${ok.length} dari ${items.length} udah keupdate di Notion.`)];
+    if (bad.length) lines.push(T('Failed, tell me again:', 'Gagal, bilang lagi:'), ...bad.map((x) => `• ${esc(x.title)}`));
+    lines.push(T('/career shows the list without them.', '/career sekarang nampilin daftar tanpa itu.'));
     return say(lines.join('\n'));
   }
 
@@ -77,5 +147,5 @@ export function createCareer({ cfg, store, say, btn, T, esc, now, fail, gather }
     return say(lines.join('\n'));
   }
 
-  return { career, appDetail, people, signalsOf };
+  return { career, appDetail, people, refer, apply, signalsOf };
 }
