@@ -9,6 +9,19 @@ import { createAgent } from './agent.js';
 import { createScheduler } from './scheduler.js';
 import { parts } from './dates.js';
 
+// Heroku's Node buildpack adds a default "web" process that also runs npm start.
+// Two pollers fight over getUpdates, so only the worker polls; a web dyno just answers health checks.
+const isWeb = (process.env.DYNO || '').startsWith('web');
+if (isWeb) {
+  const port = process.env.PORT || 3000;
+  createServer((_, res) => res.end('ok')).listen(port);
+  console.log('This is a web dyno: health endpoint only. The bot runs on the worker dyno.');
+} else {
+  await main();
+}
+
+async function main() {
+
 const cfg = loadConfig();
 const gaps = missing(cfg);
 if (gaps.length) { console.error(`Missing config vars: ${gaps.join(', ')}`); process.exit(1); }
@@ -31,7 +44,6 @@ console.log(`Komplot running. Calendars: ${cfg.google.readCalendars.join(', ') |
 setInterval(() => scheduler.tick().catch((e) => console.error('tick', e)), 60 * 1000);
 scheduler.tick().catch((e) => console.error('tick', e));
 
-// Optional health endpoint for hosts that need a web port.
 if (process.env.PORT) createServer((_, res) => res.end('ok')).listen(process.env.PORT);
 
 let offset = 0;
@@ -46,4 +58,5 @@ for (;;) {
     console.error('poll', e.message);
     await new Promise((r) => setTimeout(r, 5000));
   }
+}
 }
