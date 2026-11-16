@@ -7,6 +7,7 @@ export function loadConfig(e = env) {
   return {
     telegramToken: e.TELEGRAM_TOKEN || '',
     ownerId: Number(e.OWNER_TELEGRAM_ID || 0),
+    ownerNames: e.OWNER_NAMES || '', // how the owner is named in meeting notes, e.g. "Ibrahim, Ichsan"
     notionToken: e.NOTION_TOKEN || '',
     notion: {
       tasks: e.NOTION_TASKS_DS || '',

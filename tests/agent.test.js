@@ -28,7 +28,7 @@ function setup({ store: seed, cal: calOpts, llmDown = false, now = '2026-11-16T1
   store.now = now;
   const cal = fakeCal(calOpts);
   const tg = fakeTg();
-  const llm = fakeLlm((m, full) => (/task breakdown/.test(full) ? BREAKDOWN : /agreed project timeline/.test(full) ? PLAN : PARSES[m] || 'Bring your notes.'), { down: llmDown });
+  const llm = fakeLlm((m, full) => (/task breakdown/.test(full) ? BREAKDOWN : /agreed timeline/.test(full) ? PLAN : PARSES[m] || 'Bring your notes.'), { down: llmDown });
   const agent = createAgent({ cfg, store: store.api, cal: cal.api, llm, tg: tg.api, clock: fixedClock(now), log: { error() {}, warn() {} } });
   return { store, cal, tg, agent };
 }
@@ -67,7 +67,7 @@ test('A1 agreed plan: /plan saves it, calendar only after Yes', async () => {
   assert.equal(plan.milestones.length, 3);
   assert.deepEqual(plan.milestones.map((m) => m.mine), [true, false, true]);
   assert.equal(cal.created.length, 0);
-  await agent.handleUpdate(tap(dataOf(tg.last(), /Yes, add to calendar/)));
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Yes, all/)));
   assert.equal(cal.created.length, 3);
   assert.match(cal.created[0].title, /^★ /);
 });
@@ -281,4 +281,34 @@ test('Gemini client: a model that times out or is overloaded falls through to th
   assert.equal(llm.model(), 'gemini-3.8-flash');
   await llm.generate([{ text: 'x' }], { json: true });
   assert.equal(calls[3], 'gemini-3.8-flash', 'the model that worked is tried first next time');
+});
+
+test('A Word file sent on its own: asks what it is and which project, then saves the plan from its text', async () => {
+  const { deflateRawSync } = await import('node:zlib');
+  const { docxText } = await import('../src/docx.js');
+  // A minimal one-entry zip holding word/document.xml, deflated, the way Word writes it.
+  const xml = Buffer.from('<w:document><w:body><w:p><w:r><w:t>Lit review 17 nov (me)</w:t></w:r></w:p><w:p><w:r><w:t>Model &amp; data 18 nov Aoife</w:t></w:r></w:p></w:body></w:document>');
+  const data = deflateRawSync(xml); const name = Buffer.from('word/document.xml');
+  const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(8, 8); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(xml.length, 22); local.writeUInt16LE(name.length, 26);
+  const cd = Buffer.alloc(46); cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(8, 10); cd.writeUInt32LE(data.length, 20); cd.writeUInt32LE(xml.length, 24); cd.writeUInt16LE(name.length, 28); cd.writeUInt32LE(0, 42);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10); end.writeUInt32LE(46 + name.length, 12); end.writeUInt32LE(30 + name.length + data.length, 16);
+  const docx = Buffer.concat([local, name, data, cd, name, end]);
+  assert.equal(docxText(docx), 'Lit review 17 nov (me)\nModel & data 18 nov Aoife');
+
+  const { store, tg, agent } = setup();
+  tg.api.download = async () => docx;
+  await agent.handleUpdate(msg('', { document: { file_id: 'f1', mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', file_name: 'Derivatives_meeting_1.docx' } }));
+  assert.match(tg.last().text, /What is it\?/);
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Meeting notes/)));
+  await agent.handleUpdate(tap(dataOf(tg.last(), /New project: Derivatives meeting 1/)));
+  const task = store.tasks.find((t) => t.title === 'Derivatives meeting 1');
+  assert.equal(JSON.parse(task.plan).status, 'agreed');
+  assert.equal(JSON.parse(task.plan).milestones.length, 3);
+  assert.match(tg.last().text, /Add your 2 dated items/);
+});
+
+test('A photo or old .doc file is refused with what to send instead', async () => {
+  const { tg, agent } = setup();
+  await agent.handleUpdate(msg('', { document: { file_id: 'f2', mime_type: 'application/msword', file_name: 'notes.doc' } }));
+  assert.match(tg.last().text, /PDF, Word \(\.docx\) and plain text/);
 });

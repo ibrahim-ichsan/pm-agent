@@ -7,6 +7,7 @@ import { explain } from './explain.js';
 import { usageNote } from './llm.js';
 import { buildDigest, buildReview, parsePlan, agreedPlan, appsNeedingAttention } from './digest.js';
 import { readCalendars } from './calendar.js';
+import { docxText } from './docx.js';
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const UNDO_MS = 10 * 60 * 1000;
@@ -65,7 +66,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     await langFor(text);
     const replyTo = m.reply_to_message?.message_id;
     if (replyTo && pending.has(replyTo)) { const p = pending.get(replyTo); pending.delete(replyTo); return handleReply(p, m, text); }
-    if (m.document) return say(T('Reply to my brief request with the file, so I know which task it belongs to.', 'Reply ke pesan gue yang minta brief, biar gue tau file ini buat task yang mana.'));
+    if (m.document) return offerDoc(m.document, text);
     if (!text) return;
     tg.typing?.(chat());
     const c = parseCommand(text);
@@ -220,7 +221,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     await say(q, { forceReply: true, then: { type: 'details', id: t.id, title: t.title, needDate } });
   }
   async function askBrief(t) {
-    await say(T(`"${esc(t.title)}" sounds like a project. Reply to this with the brief (PDF, or paste the text) and I will draft a task breakdown and a timeline.`, `"${esc(t.title)}" kayaknya project. Reply pesan ini pake brief-nya (PDF, atau paste teksnya), nanti gue bikinin breakdown task sama timeline.`), { forceReply: true, then: { type: 'brief', id: t.id, title: t.title, due: t.due } });
+    await say(T(`"${esc(t.title)}" sounds like a project. Reply to this with the brief (PDF, Word, or paste the text) and I will draft a task breakdown and a timeline.`, `"${esc(t.title)}" kayaknya project. Reply pesan ini pake brief-nya (PDF, Word, atau paste teksnya), nanti gue bikinin breakdown task sama timeline.`), { forceReply: true, then: { type: 'brief', id: t.id, title: t.title, due: t.due } });
   }
 
   // ---------- replies to a question the bot asked
@@ -257,7 +258,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
         return applyDate({ kind: p.kind, id: p.id, date: d.date, time: d.time });
       }
       if (p.type === 'brief') return handleBrief(p, m, text);
-      if (p.type === 'plan') return handlePlanText(p, text);
+      if (p.type === 'plan') return handlePlan(p, m, text);
       if (p.type === 'event_date') {
         const d = readDate(text, n.date);
         if (!d.date) return say(T('No valid date found. Send the event again with a date.', 'Nggak ada tanggal yang valid. Kirim ulang event-nya pake tanggal.'));
@@ -271,6 +272,36 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     return say(T(`Done. "${esc(item.title)}" is now due ${pretty(item.due, item.time)}.`, `Beres. "${esc(item.title)}" sekarang deadline ${pretty(item.due, item.time)}.`));
   }
 
+  // ---------- files: a PDF goes to the model as it is, Word and plain text are read here
+  const DOCX = /wordprocessingml|\.docx$/i;
+  const fileKind = (d) => (/pdf/i.test(d.mime_type || '') || /\.pdf$/i.test(d.file_name || '') ? 'pdf' : DOCX.test(`${d.mime_type || ''} ${d.file_name || ''}`) ? 'docx' : /^text\//.test(d.mime_type || '') || /\.(txt|md)$/i.test(d.file_name || '') ? 'text' : null);
+  const UNSUPPORTED = () => T('I can read PDF, Word (.docx) and plain text files. Old .doc files and photos are not supported: export to PDF first.', 'Gue bisa baca PDF, Word (.docx) sama file teks. File .doc lama sama foto belum bisa: export ke PDF dulu.');
+  // Returns { part, text }: a model part for a PDF, or the plain text of a Word or text file.
+  async function readFile(d) {
+    const kind = fileKind(d);
+    const buf = await tg.download(d.file_id);
+    if (kind === 'pdf') return { part: { inline_data: { mime_type: 'application/pdf', data: buf.toString('base64') } }, text: '' };
+    return { part: null, text: (kind === 'docx' ? docxText(buf) : buf.toString('utf8')).slice(0, 60000) };
+  }
+  // A file sent on its own: ask what it is, then which project it belongs to.
+  async function offerDoc(d, caption) {
+    if (!fileKind(d)) return say(UNSUPPORTED());
+    const doc = { file_id: d.file_id, mime_type: d.mime_type, file_name: d.file_name };
+    return say(T(`Got "${esc(d.file_name || 'the file')}". What is it?`, `"${esc(d.file_name || 'File')}" udah masuk. Ini apa?`), {
+      buttons: [btn(T('Meeting notes: who does what, by when', 'Notulen: siapa ngerjain apa, kapan'), { type: 'doc_kind', kind: 'plan', doc, caption }),
+        btn(T('Project brief: suggest a breakdown', 'Brief project: saranin breakdown'), { type: 'doc_kind', kind: 'brief', doc, caption })],
+    });
+  }
+  async function pickDocProject(a) {
+    const tasks = await projectTasks();
+    const name = (a.caption || (a.doc.file_name || 'Project').replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ')).slice(0, 80);
+    return say(T('Which project is it for?', 'Buat project yang mana?'), {
+      buttons: [...tasks.slice(0, 8).map((t) => btn(t.title.slice(0, 40), { type: 'doc_for', kind: a.kind, doc: a.doc, caption: a.caption, id: t.id, title: t.title, due: t.due })),
+        btn(T(`New project: ${name.slice(0, 30)}`, `Project baru: ${name.slice(0, 30)}`), { type: 'doc_new', kind: a.kind, doc: a.doc, caption: a.caption, name })],
+    });
+  }
+  const runDoc = (a, p) => (a.kind === 'plan' ? handlePlan(p, { document: a.doc }, '') : handleBrief(p, { document: a.doc }, ''));
+
   // ---------- project brief, breakdown, agreed plan (Table A row 1)
   async function handleBrief(p, m, text) {
     if (!llm.enabled) return say(T('I need the language model for a breakdown. Set GEMINI_API_KEY first.', 'Buat breakdown gue butuh language model. Isi GEMINI_API_KEY dulu.'));
@@ -278,13 +309,12 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     const partsIn = [];
     let briefNote = text;
     if (m.document) {
-      const mime = m.document.mime_type || '';
-      if (!/pdf|text\//.test(mime)) return say(T('Send the brief as a PDF or paste the text. Word files are not supported, export to PDF first.', 'Kirim brief-nya dalam PDF atau paste teksnya. File Word belum bisa, export ke PDF dulu.'), { forceReply: true, then: p });
-      const buf = await tg.download(m.document.file_id);
-      partsIn.push({ inline_data: { mime_type: mime.includes('pdf') ? 'application/pdf' : 'text/plain', data: buf.toString('base64') } });
-      briefNote = `File: ${m.document.file_name || 'brief'}${text ? ` · ${text}` : ''}`;
+      if (!fileKind(m.document)) return say(UNSUPPORTED(), { forceReply: true, then: p });
+      const f = await readFile(m.document);
+      if (f.part) partsIn.push(f.part); else text = `${text ? `${text}\n` : ''}${f.text}`;
+      briefNote = `File: ${m.document.file_name || 'brief'}`;
     }
-    if (!partsIn.length && !text) return say(T('Reply with the PDF or the brief text.', 'Reply pake PDF atau teks brief-nya.'), { forceReply: true, then: p });
+    if (!partsIn.length && !text) return say(T('Reply with the PDF, the Word file or the brief text.', 'Reply pake PDF, file Word, atau teks brief-nya.'), { forceReply: true, then: p });
     const due = p.due ? pretty(p.due) : 'unknown';
     partsIn.push({ text: `Project: ${p.title}\nToday: ${n.date}\nFinal due date: ${p.due || 'unknown'} (${due})\n${text ? `Brief text or notes:\n${text}\n` : ''}
 Make a task breakdown and a timeline suggestion that ends on or before the due date. Return JSON only:
@@ -320,39 +350,68 @@ Use only dates from today to the due date. If the due date is unknown, plan in r
     return say(T('Which project is the agreed plan for?', 'Plan final ini buat project yang mana?'), { buttons: tasks.slice(0, 8).map((t) => btn(t.title.slice(0, 40), { type: 'plan_for', id: t.id, title: t.title, due: t.due })) });
   }
   async function askPlan(t) {
-    await say(T(`Paste the agreed timeline for "${esc(t.title)}" and your part, e.g. "lit review by 20 nov (me), model 24 nov (Aoife), slides 27 nov (me), submit 28 nov".`, `Paste timeline final "${esc(t.title)}" sama bagian lo, contoh "lit review 20 nov (gue), model 24 nov (Aoife), slides 27 nov (gue), submit 28 nov".`), { forceReply: true, then: { type: 'plan', id: t.id, title: t.title, due: t.due } });
+    await say(T(`Paste the agreed timeline for "${esc(t.title)}" and your part, or reply with the meeting notes as PDF or Word. E.g. "lit review by 20 nov (me), model 24 nov (Aoife), slides 27 nov (me), submit 28 nov".`, `Paste timeline final "${esc(t.title)}" sama bagian lo, contoh "lit review 20 nov (gue), model 24 nov (Aoife), slides 27 nov (gue), submit 28 nov".`), { forceReply: true, then: { type: 'plan', id: t.id, title: t.title, due: t.due } });
   }
-  async function handlePlanText(p, text) {
+  // The agreed plan, typed or as meeting notes in a file: who does what by when, the next meeting, where the data comes from.
+  async function handlePlan(p, m, typed) {
     const n = now();
-    let ms = [];
+    let text = typed || ''; const partsIn = [];
+    if (m.document) {
+      if (!fileKind(m.document)) return say(UNSUPPORTED(), { forceReply: true, then: p });
+      const f = await readFile(m.document);
+      if (f.part) partsIn.push(f.part); else text = `${text ? `${text}\n` : ''}${f.text}`;
+    }
+    if (!partsIn.length && !text.trim()) return say(T('Send the notes as text, PDF or Word.', 'Kirim notulennya sebagai teks, PDF, atau Word.'), { forceReply: true, then: p });
+    let ms = []; let undated = []; let sources = []; let meeting = null;
     if (llm.enabled) {
+      let out;
       try {
-        const out = await llm.generate([{ text: `Today: ${n.date}. Turn this agreed project timeline into JSON only: {"milestones":[{"title":..., "date_text": the exact date words, "time_text": "", "mine": true if the owner (me/gue/I) owns it}]}\nTimeline:\n${text}` }], { json: true, system: 'You extract structured data. Output JSON only.' });
-        ms = (out.milestones || []).map((x) => { const d = readDate(x.date_text || '', n.date); return { title: x.title, date: d.date, start: readDate(x.time_text || '', n.date).time, mine: !!x.mine }; }).filter((x) => x.title && x.date);
+        out = await llm.generate([...partsIn, { text: `Today: ${n.date}. The owner is ${cfg.ownerNames || 'the person writing'} (also "me", "I", "gue", "gw", "saya").
+These are meeting notes or an agreed timeline for the project "${p.title}". Extract JSON only:
+{"milestones":[{"title": the piece of work, short, "owner": the name written in the notes or "", "date_text": the exact date words or "", "time_text": the exact time words or "", "mine": true if the owner above does it}],
+ "next_meeting": {"date_text": "", "time_text": "", "place": ""},
+ "data_sources": [where the data comes from, as written],
+ "other": [short decisions worth keeping that are not tasks]}
+Include filming or recording sessions as milestones. Copy dates as written; never invent a date, an owner or a source.${text ? `\nNotes:\n${text}` : ''}` }], { json: true, system: 'You extract structured data. Output JSON only.', timeoutMs: 90000 });
       } catch (e) { return fail(e); }
+      const all = (out.milestones || []).filter((x) => x && x.title).map((x) => { const d = readDate(x.date_text || '', n.date); return { title: String(x.title).slice(0, 120), owner: String(x.owner || '').slice(0, 40), date: d.date, start: readDate(x.time_text || '', n.date).time, mine: !!x.mine }; });
+      ms = all.filter((x) => x.date); undated = all.filter((x) => !x.date);
+      sources = (out.data_sources || []).map(String).filter(Boolean).slice(0, 8);
+      const nm = out.next_meeting || {}; const md = readDate(nm.date_text || '', n.date);
+      if (md.date) { meeting = { date: md.date, start: readDate(nm.time_text || '', n.date).time, place: String(nm.place || '').slice(0, 60) }; ms.push({ title: `Next meeting${meeting.place ? ` (${meeting.place})` : ''}`, owner: '', date: meeting.date, start: meeting.start, mine: true }); }
+      ms.sort((a, b) => (a.date + (a.start || '')).localeCompare(b.date + (b.start || '')));
     } else {
+      if (partsIn.length) return say(T('I need the language model to read a PDF. Paste the text instead, or set GEMINI_API_KEY.', 'Buat baca PDF gue butuh language model. Paste teksnya aja, atau isi GEMINI_API_KEY.'));
       // Without the model: one milestone per line or comma part that carries a date.
-      ms = text.split(/[\n,;]+/).map((s) => { const d = readDate(s, n.date); return d.date ? { title: s.replace(/\(.*?\)/g, '').trim(), date: d.date, start: d.time, mine: /\b(me|gue|gw|saya|i)\b/i.test(s) } : null; }).filter(Boolean);
+      ms = text.split(/[\n,;]+/).map((s) => { const d = readDate(s, n.date); return d.date ? { title: s.replace(/\(.*?\)/g, '').trim(), owner: '', date: d.date, start: d.time, mine: /\b(me|gue|gw|saya|i)\b/i.test(s) } : null; }).filter(Boolean);
     }
     if (!ms.length) return say(T('I could not find any dated steps in that. Try one step per line with a date.', 'Gue nggak nemu langkah yang ada tanggalnya. Coba satu langkah per baris pake tanggal.'), { forceReply: true, then: p });
-    await store.updateTask(p.id, { plan: JSON.stringify({ status: 'agreed', milestones: ms, text: text.slice(0, 1500) }), calendarEvents: '' });
-    const lines = [T(`Saved the agreed plan for "${esc(p.title)}":`, `Plan final "${esc(p.title)}" udah kesimpen:`), ...ms.map((x) => `• ${pretty(x.date, x.start)}: ${esc(x.title)}${x.mine ? T(' (yours)', ' (bagian lo)') : ''}`)];
-    lines.push('', T(`Add these ${ms.length} steps to ${cfg.google.writeCalendar || 'your calendar'}?`, `Masukin ${ms.length} langkah ini ke ${cfg.google.writeCalendar || 'kalender lo'}?`));
-    return say(lines.join('\n'), { buttons: [btn(T('Yes, add to calendar', 'Ya, masukin kalender'), { type: 'plan_to_cal', taskId: p.id }), btn(T('Not now', 'Nanti aja'), { type: 'cancel' })] });
+    const patch = { plan: JSON.stringify({ status: 'agreed', milestones: ms, undated, sources, text: text.slice(0, 1200) }), calendarEvents: '' };
+    if (sources.length) patch.details = `Data: ${sources.join('; ')}`.slice(0, 1900);
+    await store.updateTask(p.id, patch);
+    const who = (x) => (x.mine ? T(' (yours)', ' (bagian lo)') : x.owner ? ` — ${esc(x.owner)}` : '');
+    const lines = [T(`Saved the agreed plan for "${esc(p.title)}":`, `Plan final "${esc(p.title)}" udah kesimpen:`), ...ms.map((x) => `• ${pretty(x.date, x.start)}: ${esc(x.title)}${who(x)}`)];
+    if (undated.length) lines.push('', T('No date in the notes, so not on the timeline:', 'Nggak ada tanggalnya di notulen, jadi nggak masuk timeline:'), ...undated.slice(0, 8).map((x) => `• ${esc(x.title)}${who(x)}`));
+    if (sources.length) lines.push('', T('Data from:', 'Sumber data:'), ...sources.map((x) => `• ${esc(x)}`));
+    const mine = ms.filter((x) => x.mine).length;
+    lines.push('', T(`Add your ${mine} dated item${mine === 1 ? '' : 's'} to ${cfg.google.writeCalendar || 'your calendar'}? Calendar items show up in the morning digest; the full plan stays in Notion.`, `Masukin ${mine} item lo yang ada tanggalnya ke ${cfg.google.writeCalendar || 'kalender lo'}? Yang di kalender muncul di digest pagi; plan lengkapnya tetep di Notion.`));
+    return say(lines.join('\n'), { buttons: [btn(T('Yes, mine only', 'Ya, punya gue aja'), { type: 'plan_to_cal', taskId: p.id, only: 'mine' }), btn(T(`Yes, all ${ms.length}`, `Ya, semua ${ms.length}`), { type: 'plan_to_cal', taskId: p.id }), btn(T('Not now', 'Nanti aja'), { type: 'cancel' })] });
   }
-  async function planToCalendar(taskId) {
+  async function planToCalendar(taskId, only) {
     const t = (await store.openTasks()).find((x) => x.id === taskId);
     const plan = t && agreedPlan(t.plan);
     if (!plan) return say(T('That plan is gone or not agreed yet.', 'Plan-nya udah nggak ada atau belum final.'));
     const ids = [];
-    for (const x of plan.milestones) {
+    const steps = only === 'mine' ? plan.milestones.filter((x) => x.mine) : plan.milestones;
+    if (!steps.length) return say(T('None of the steps are marked as yours.', 'Nggak ada langkah yang ditandai punya lo.'));
+    for (const x of steps) {
       try {
         const ev = await cal.create(cfg.google.writeCalendar, { title: `${x.mine ? '★ ' : ''}${x.title} · ${t.title}`, date: x.date, start: x.start, end: x.start ? addMinutes(x.start, 60) : null, description: 'Added by Komplot from the agreed plan.' });
         ids.push(ev.id);
       } catch (e) { await say(explain(e, lastLang, { calendarId: cfg.google.writeCalendar, saEmail: cal.email })); break; }
     }
     if (ids.length) await store.updateTask(t.id, { calendarEvents: ids.join(' ') });
-    return say(T(`Added ${ids.length} of ${plan.milestones.length} steps to the calendar.`, `${ids.length} dari ${plan.milestones.length} langkah udah masuk kalender.`));
+    return say(T(`Added ${ids.length} of ${steps.length} steps to the calendar.`, `${ids.length} dari ${steps.length} langkah udah masuk kalender.`));
   }
 
   // ---------- applications (AG-04, Table D row 3)
@@ -487,7 +546,10 @@ Use only dates from today to the due date. If the due date is unknown, plan in r
         }
         case 'brief_for': return askBrief(a);
         case 'plan_for': return askPlan(a);
-        case 'plan_to_cal': return planToCalendar(a.taskId);
+        case 'plan_to_cal': return planToCalendar(a.taskId, a.only);
+        case 'doc_kind': return pickDocProject(a);
+        case 'doc_for': return runDoc(a, { id: a.id, title: a.title, due: a.due });
+        case 'doc_new': { const t0 = await store.createTask({ title: a.name, area: 'Coursework' }); await say(T(`Created the project task "${esc(t0.title)}" in Notion.`, `Task project "${esc(t0.title)}" udah dibikin di Notion.`)); return runDoc(a, { id: t0.id, title: t0.title, due: t0.due }); }
         case 'create_event': { const ev = await cal.create(cfg.google.writeCalendar, a.ev); return say(T(`Created "${esc(ev.title)}" on ${pretty(ev.date, ev.start)} in ${cfg.google.writeCalendar}.`, `Event "${esc(ev.title)}" udah dibikin ${pretty(ev.date, ev.start)} di ${cfg.google.writeCalendar}.`)); }
         case 'edit_event': { const ev = await cal.patch(a.ev.calendarId, a.ev.id, a.patch); return say(T(`Moved "${esc(ev.title)}" to ${pretty(ev.date, ev.start)}.`, `"${esc(ev.title)}" udah dipindah ke ${pretty(ev.date, ev.start)}.`)); }
         case 'delete_event': return say(T(`Really delete "${esc(a.ev.title)}" on ${pretty(a.ev.date, a.ev.start)}?`, `Beneran hapus "${esc(a.ev.title)}" ${pretty(a.ev.date, a.ev.start)}?`), { buttons: [btn(T('Yes, delete event', 'Ya, hapus event'), { type: 'delete_event_yes', ev: a.ev }), btn(T('No', 'Nggak'), { type: 'cancel' })] });
@@ -609,7 +671,9 @@ Commands
 /done tick things off · /add force a task
 /brief send a project brief · /plan save the agreed timeline
 /shift log a part-time shift · /usage model usage
-/lang en | id | auto · /retry last failed capture`,
+/lang en | id | auto · /retry last failed capture
+
+Files: send meeting notes or a project brief as PDF or Word (.docx) and I ask which project it is for.`,
   id: `<b>Komplot</b>, partner PM lo. Tulis aja, contoh:
 • "submit derivatives group report jumat"
 • "applied AIB grad risk, deadline 30 nov"
@@ -622,5 +686,7 @@ Command
 /done centang yang kelar · /add paksa jadi task
 /brief kirim brief project · /plan simpen timeline final
 /shift catat shift part-time · /usage pemakaian model
-/lang en | id | auto · /retry ulang capture yang gagal`,
+/lang en | id | auto · /retry ulang capture yang gagal
+
+File: kirim notulen meeting atau brief project (PDF atau Word .docx), nanti gue tanya buat project yang mana.`,
 };
