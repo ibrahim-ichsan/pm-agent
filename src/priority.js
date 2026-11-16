@@ -4,16 +4,24 @@
 import { diffDays, pretty } from './dates.js';
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// An offer has to be stated as one: "she offered a referral", "happy to introduce me". The bare words
+// "referral" or "introduction" in notes about how networking works are not a signal.
+const OFFER = String.raw`(?:offer\w*|happy|willing|glad|can|could|will|would|nawarin|mau|bisa|bersedia)\b[^.\n]{0,40}`;
 export const SIGNALS = [
-  ['referral offered', /\breferr|\brefer me|rekomendasi/i],
-  ['introduction offered', /\bintroduc|\bintro\b|connect (?:me|you)|kenalin/i],
+  ['referral offered', new RegExp(String.raw`${OFFER}\brefer|\brefer (?:me|you)\b|\breferral offered`, 'i')],
+  ['introduction offered', new RegExp(String.raw`${OFFER}\bintro|\bintroduce (?:me|you)\b|\bkenalin (?:gw|gue|aku|saya)`, 'i')],
   ['hiring mentioned', /\bhiring\b|open roles?|vacanc|\bopenings?\b|lowongan|recruiting now/i],
 ];
-export const signalsOf = (row) => { const t = `${row.people} ${row.topics} ${row.takeaways} ${row.nextSteps}`; return SIGNALS.filter(([, re]) => re.test(t)).map(([name]) => name); };
+// "Nobody met", "none", "-" in the People field is not a person.
+export const personOf = (row) => { const first = String(row.people || '').split('\n')[0].trim(); return /^(nobody|no one|none|n\/a|tidak ada|nggak ada|-|—)?$/i.test(first) || /^(nobody|no one|none)\b/i.test(first) ? '' : first; };
+export const signalsOf = (row) => { if (!personOf(row)) return []; const t = `${row.people} ${row.topics} ${row.nextSteps}`; return SIGNALS.filter(([, re]) => re.test(t)).map(([name]) => name); };
 // The owner has done their part and is waiting for the other side. Kept in the existing "Next action" field.
 export const WAITING = /\b(wait(ing)?|await(ing)?|nunggu|menunggu|pending result)\b/i;
 export const isWaiting = (a) => WAITING.test(a.nextAction || '');
 const TIER = { 'Tier 1': 30, 'Tier 2': 15, 'Tier 3': 0 };
+// Calendar entries that are career work in themselves: a test, an assessment, an interview, an application deadline.
+const CAREER_EVENT = /\b(assessment|online test|aptitude|interview|hirevue|case study|video interview|application deadline|deadline)\b/i;
+const NOT_CAREER_EVENT = /\b(lecture|tutorial|lab|seminar|class)\b/i;
 const hours = (e) => (e.allDay || !e.start || !e.end ? 0 : Math.max(0, (Number(e.end.slice(0, 2)) * 60 + Number(e.end.slice(3)) - Number(e.start.slice(0, 2)) * 60 - Number(e.start.slice(3))) / 60));
 
 // Networking rows that mention a company, for "you know someone there".
@@ -48,7 +56,7 @@ export function appChecks(a, { tasks = [], net = [], events = [], today, idleDay
 
 // Every candidate with a score and a one-line reason. scope 'career' leaves out coursework and personal tasks.
 export function rank(d, { scope = 'all', horizon = 0 } = {}) {
-  const { today } = d; const items = [];
+  const { today } = d; const items = []; const usedEvents = new Set();
   const push = (kind, title, score, why, extra = {}) => { if (score > 0) items.push({ kind, title, score, why: why.filter(Boolean).join(', '), ...extra }); };
   for (const t of d.tasks || []) {
     if (scope === 'career' && t.area !== 'Job search') continue;
@@ -91,7 +99,7 @@ export function rank(d, { scope = 'all', horizon = 0 } = {}) {
     const cal0 = checks.find((c) => c.startsWith('On the calendar'));
     if ((dated || cal0) && checks.some((c) => /no prep task|no task for it/.test(c))) { s += 10; why.push('no prep task yet'); }
     const cal = checks.find((c) => c.startsWith('On the calendar'));
-    if (cal) { s += 40; why.push(cal.replace('On the calendar: ', '').replace(/\.$/, '')); }
+    if (cal) { s += 40; why.push(cal.replace('On the calendar: ', '').replace(/\.$/, '')); usedEvents.add(cal); }
     if (checks.some((c) => c.startsWith('You know someone'))) why.push('you know someone there');
     if (s) { s += tier; if (a.tier) why.unshift(a.tier); }
     push('app', a.title, s, why, { id: a.id });
@@ -101,13 +109,21 @@ export function rank(d, { scope = 'all', horizon = 0 } = {}) {
       const late = diffDays(today, r.followUp);
       if (late < -Math.max(0, horizon)) continue;
       const sig = signalsOf(r);
-      const who = (r.people.split('\n')[0] || '').slice(0, 50);
-      push('net', `Follow up: ${who || r.title}`, 55 + (late > 0 ? Math.min(15, late * 3) : 0) + sig.length * 20 + (r.people ? 0 : -25),
+      const who = personOf(r).slice(0, 50);
+      push('net', `Follow up: ${who || r.title}`, 55 + (late > 0 ? Math.min(15, late * 3) : 0) + sig.length * 20 + (who ? 0 : -25),
         [who ? `met at ${r.title}` : 'learning entry', ...sig, late > 0 ? `follow-up ${late} day${late > 1 ? 's' : ''} overdue` : late === 0 ? 'follow-up due today' : `follow-up by ${pretty(r.followUp)}`], { id: r.id });
     } else if (r.status === 'Upcoming' && r.date && diffDays(r.date, today) >= 0 && diffDays(r.date, today) <= horizon) {
       const left = diffDays(r.date, today);
       push('event', `${r.title}`, (r.type === 'Employer event' ? 50 : 35) - left * 3, [r.type || 'event', left === 0 ? `today${r.time ? ' ' + r.time : ''}` : pretty(r.date, r.time), r.prep ? '/prep has the questions' : 'no prep yet'], { id: r.id });
     }
+  }
+  // Tests, assessments and interviews that sit on the calendar are work to do even when the application row has no date.
+  for (const e of d.events || []) {
+    const left = diffDays(e.date, today);
+    if (left < 0 || left > Math.max(1, horizon) || !CAREER_EVENT.test(e.title) || NOT_CAREER_EVENT.test(e.title)) continue;
+    if ([...usedEvents].some((u) => u.includes(e.title))) continue; // already the reason an application is ranked
+    if (items.some((x) => x.kind === 'cal' && x.title === e.title)) continue;
+    push('cal', e.title, left === 0 ? 100 : left === 1 ? 90 : left <= 3 ? 75 : 50, ['on your calendar', left === 0 ? `today${e.start ? ' ' + e.start : ''}` : left === 1 ? `tomorrow${e.start ? ' ' + e.start : ''}` : pretty(e.date, e.allDay ? null : e.start)]);
   }
   return items.sort((a, b) => b.score - a.score);
 }

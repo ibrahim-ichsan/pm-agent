@@ -4,7 +4,7 @@
 import { addDays, pretty, readDate } from './dates.js';
 import { similarity } from './parse.js';
 import { ownerContext } from './persona.js';
-import { rank, signalsOf } from './priority.js';
+import { rank, personOf } from './priority.js';
 
 const PLAYS = ['Thank-you note', 'Ask for intro', 'Reach out', 'Learn', 'Apply'];
 const join = (old, add) => [old, add].filter((s) => s && String(s).trim()).join('\n').slice(0, 1900);
@@ -110,9 +110,9 @@ Message: ${text}` }], { json: true, system: 'You extract structured data. Output
     const lines = [`<b>${T('Waiting for a follow-up', 'Nunggu follow-up')} (${waiting.length})</b>`];
     for (const x of top) {
       const r = byId.get(x.id);
-      lines.push('', `<b>${esc((r.people.split('\n')[0] || r.title).slice(0, 80))}</b>`, `${T('Why now', 'Kenapa sekarang')}: ${esc(x.why)}`);
+      lines.push('', `<b>${esc((personOf(r) || r.title).slice(0, 80))}</b>`, `${T('Why now', 'Kenapa sekarang')}: ${esc(x.why)}`);
       if (r.topics) lines.push(`${T('You discussed', 'Bahasan')}: ${esc(r.topics.split('\n')[0].slice(0, 160))}`);
-      lines.push(`${T('Do', 'Lakuin')}: ${esc(r.nextSteps ? r.nextSteps.split('\n')[0].slice(0, 160) : r.people ? (r.plays[0] || 'Thank-you note') : T('turn one takeaway into a task', 'jadiin satu takeaway task'))}`);
+      lines.push(`${T('Do', 'Lakuin')}: ${esc(r.nextSteps ? r.nextSteps.split('\n')[0].slice(0, 160) : personOf(r) ? (r.plays[0] || 'Thank-you note') : T('turn one takeaway into a task', 'jadiin satu takeaway task'))}`);
     }
     if (waiting.length > top.length) lines.push('', T(`${waiting.length - top.length} more are lower priority.`, `${waiting.length - top.length} lagi prioritasnya lebih rendah.`));
     const buttons = top.slice(0, 4).map((x) => btn(`✓ ${byId.get(x.id).title.slice(0, 36)}`, { type: 'net_done', id: x.id, title: byId.get(x.id).title }));

@@ -513,3 +513,27 @@ test('List replies are parsed by section, numbers, ranges and "all"', async () =
   assert.deepEqual(parseListReply('buy printer paper friday'), []);
   assert.deepEqual(parseListReply('this is urgent, finish the report'), []);
 });
+
+test('List reply: each section mention keeps its own status ("important 4 udah direject, important 2,3 ... nunggu")', async () => {
+  const { parseListReply } = await import('../src/career.js');
+  assert.deepEqual(parseListReply('important 4 udah direject, important 2,3 udah online test lagi nunggu. oiya harusnya ada daa dan FCA juga kan'), [
+    { section: 'important', index: 3, status: 'Rejected' }, { section: 'important', index: 1, status: 'waiting' }, { section: 'important', index: 2, status: 'waiting' }]);
+  assert.deepEqual(parseListReply('yang Urgent 1,2,3 udah gaditerima gw. Urgent 4 dan semua di Important udah gw lakuin tinggal nunggu hasil'), [
+    { section: 'urgent', index: 0, status: 'Rejected' }, { section: 'urgent', index: 1, status: 'Rejected' }, { section: 'urgent', index: 2, status: 'Rejected' },
+    { section: 'urgent', index: 3, status: 'waiting' }, { section: 'important', all: true, status: 'waiting' }]);
+});
+
+test('Ranking: an assessment on the calendar is career work; a learning entry is not a person and carries no offer signals', async () => {
+  const { rank, signalsOf, personOf } = await import('../src/priority.js');
+  const webinar = { kind: 'net', id: 'w', title: 'Webinar', status: 'Attended', followUp: '2026-11-22', people: 'Nobody met one to one. Speaker: Ben Chon', topics: 'referral chain, coffee chats', takeaways: 'tell the introducer how the intro went', nextSteps: '', plays: [] };
+  assert.equal(personOf(webinar), '');
+  assert.deepEqual(signalsOf(webinar), []);
+  assert.deepEqual(signalsOf({ people: 'Vikas (EY)', topics: 'He offered referrals and can introduce me to his manager', nextSteps: '' }), ['referral offered', 'introduction offered']);
+  const d = { today: '2026-11-16', tasks: [], net: [webinar], apps: [{ id: 'd', title: 'daa — Graduate Programme', company: 'daa', stage: 'Applied' }],
+    events: [{ title: 'Complete daa Assessment', date: '2026-11-18', allDay: true }, { title: 'FCA Job Insight Assessment Deadline', date: '2026-11-19', start: '22:04', end: '22:54' }, { title: 'FIN41660: Financial Econometrics (Lecture)', date: '2026-11-19', start: '09:00', end: '10:50' }] };
+  const r = rank(d, { scope: 'career', horizon: 7 });
+  assert.deepEqual(r.filter((x) => x.kind === 'cal').map((x) => x.title), ['Complete daa Assessment', 'FCA Job Insight Assessment Deadline']);
+  assert.ok(r.find((x) => x.title === 'Complete daa Assessment').score >= 75);
+  assert.ok(!r.some((x) => /Lecture/.test(x.title)));
+  assert.ok(r.find((x) => x.kind === 'net').score < 40, 'a learning entry does not reach the priority lists');
+});

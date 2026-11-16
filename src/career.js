@@ -6,24 +6,29 @@ import { resolveApp, similarity } from './parse.js';
 
 const SECTION = /(urgent|mendesak|important|penting)/gi;
 const STATUS = [
-  ['Rejected', /\b(rejected|reject|rejection|ditolak|tolak|gagal|unsuccessful|not accepted|(?:ga|gak|nggak|ngga|enggak|tidak|tdk)\s*k?\s*diterima|gaditerima)\b/i],
+  ['Rejected', /\b(?:di\s?)?(rejected|reject|rejection|ditolak|tolak|gagal|unsuccessful|not accepted|(?:ga|gak|nggak|ngga|enggak|tidak|tdk)\s*k?\s*diterima|gaditerima)\b/i],
   ['Withdrawn', /\b(withdrawn|withdrew|withdraw|mundur)\b/i],
   ['waiting', /\b(nunggu|menunggu|tunggu|waiting|wait|pending|done|completed|submitted|selesai|kelar|udah\s+(?:gw\s+|gue\s+|aku\s+|saya\s+)?(?:lakuin|kerjain|dikerjain|submit)|sudah\s+(?:di)?kerjakan)\b/i],
 ];
 // "Urgent 1,2,3 rejected. Urgent 4 and everything in Important done, waiting" -> [{ section, index|all, status }]
 export function parseListReply(text) {
   const out = [];
+  const statusOf = (t) => (STATUS.find(([, re]) => re.test(t)) || [])[0];
   for (const clause of text.split(/[.;\n]+/)) {
-    const status = (STATUS.find(([, re]) => re.test(clause)) || [])[0];
     const marks = [...clause.matchAll(SECTION)];
-    if (!status || !marks.length) continue;
+    if (!marks.length || !statusOf(clause)) continue;
+    // Each section mention owns the words up to the next mention. Its status is the one stated there;
+    // "urgent 4 and everything in important are done" gives urgent 4 the status of the mention after it.
+    const segs = marks.map((m, i) => clause.slice(m.index + m[0].length, i + 1 < marks.length ? marks[i + 1].index : clause.length));
+    const own = segs.map(statusOf);
     marks.forEach((m, i) => {
+      const status = own[i] || own.slice(i + 1).find(Boolean) || own.slice(0, i).reverse().find(Boolean);
+      if (!status) return;
       const section = /urgent|mendesak/i.test(m[0]) ? 'urgent' : 'important';
-      const after = clause.slice(m.index + m[0].length, i + 1 < marks.length ? marks[i + 1].index : clause.length);
       const nums = [];
       // Numbers count only while they directly follow the section word: "Urgent 1, 2 and 4", "urgent 1-3".
-      const lead = (after.match(/^[\s:#]*((?:\d+\s*(?:[-–]\s*\d+)?\s*(?:,|&|\+|dan|and|sama)?\s*)+)/i) || [])[1] || '';
-      for (const part of lead.matchAll(/(\d+)\s*(?:[-–]\s*(\d+))?/g)) { const a = Number(part[1]); const b = Number(part[2] || part[1]); for (let k = a; k <= b && k < a + 20; k++) nums.push(k); }
+      const lead = (segs[i].match(/^[\s:#]*((?:\d+\s*(?:[-–]\s*\d+)?\s*(?:,|&|\+|dan|and|sama)?\s*)+)/i) || [])[1] || '';
+      for (const part of lead.matchAll(/(\d+)\s*(?:[-–]\s*(\d+))?/g)) { const x = Number(part[1]); const y = Number(part[2] || part[1]); for (let k = x; k <= y && k < x + 20; k++) nums.push(k); }
       if (nums.length) for (const k of nums) out.push({ section, index: k - 1, status });
       else out.push({ section, all: true, status });
     });
