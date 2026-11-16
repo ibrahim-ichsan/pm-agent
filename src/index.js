@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { loadConfig, missing } from './config.js';
 import { notionClient, notionStore } from './notion.js';
 import { calendarClient } from './calendar.js';
-import { geminiClient } from './llm.js';
+import { geminiClient, openaiClient, llmChain } from './llm.js';
 import { telegramClient } from './telegram.js';
 import { createAgent } from './agent.js';
 import { createScheduler } from './scheduler.js';
@@ -30,7 +30,9 @@ if (gaps.length) { console.error(`Missing config vars: ${gaps.join(', ')}`); pro
 const within = (ms) => (url, opt = {}) => fetch(url, { ...opt, signal: opt.signal || AbortSignal.timeout(ms) });
 const store = notionStore(notionClient(cfg.notionToken, within(20000)), cfg.notion);
 const cal = calendarClient(cfg.google.serviceAccount, within(20000));
-const llm = geminiClient(cfg.gemini, within(20000), () => parts(new Date()).date);
+const day = () => parts(new Date()).date;
+// The fast provider answers first; Gemini is the fallback and the one that reads PDFs.
+const llm = llmChain([openaiClient(cfg.llm, within(20000), day), geminiClient(cfg.gemini, within(20000), day)]);
 const tg = telegramClient(cfg.telegramToken, within(45000));
 const agent = createAgent({ cfg, store, cal, llm, tg });
 const scheduler = createScheduler({ cfg, store, agent });
@@ -42,7 +44,7 @@ await tg.setCommands([
   ['shift', 'Log a part-time shift'], ['usage', 'Model usage'], ['lang', 'en | id | auto'], ['help', 'How to use me'],
 ].map(([command, description]) => ({ command, description }))).catch((e) => console.warn('setMyCommands failed', e.message));
 
-console.log(`Komplot running. Calendars: ${cfg.google.readCalendars.join(', ') || 'none'}. Model: ${cfg.gemini.key ? cfg.gemini.model || 'auto' : 'off'}.`);
+console.log(`Komplot running. Calendars: ${cfg.google.readCalendars.join(', ') || 'none'}. Model: ${llm.providers().join(' then ') || 'off'}.`);
 setInterval(() => scheduler.tick().catch((e) => console.error('tick', e)), 60 * 1000);
 scheduler.tick().catch((e) => console.error('tick', e));
 

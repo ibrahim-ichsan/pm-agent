@@ -38,10 +38,10 @@ All keys and IDs are config vars. The repo holds none.
 
 1. **Telegram**: the bot token from BotFather goes in `TELEGRAM_TOKEN`. Your numeric user ID (ask @userinfobot) goes in `OWNER_TELEGRAM_ID`.
 2. **Notion**: create an internal integration at notion.so/profile/integrations and put its secret in `NOTION_TOKEN`. On the "Komplot — PM Agent" page and on the roadmap database, open ••• > Connections and add the integration. Put the data source IDs in the `NOTION_*_DS` vars.
-3. **Gemini**: create a key at aistudio.google.com and put it in `GEMINI_API_KEY`. Without it, commands still work and free text is filed as a plain task.
+3. **Language model**: two free options, and both can be set. `GROQ_API_KEY` (console.groq.com) is tried first because it answers fast; `GEMINI_API_KEY` (aistudio.google.com) is the fallback and the only one that reads PDFs. Any other OpenAI-compatible provider works through `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL`. With no key at all, commands still work and free text is read by rule (dates, times, stage updates).
 4. **Google Calendar**: in Google Cloud, enable the Google Calendar API, create a service account, add a JSON key and paste the whole file into `GOOGLE_SERVICE_ACCOUNT_JSON`. Share each calendar with the service account's email ("Make changes to events"). List the calendars in `CALENDAR_IDS`.
 5. **Heroku**: create an app, set the config vars, deploy this repo, then scale `worker=1` (the bot needs no web dyno).
 
 ## Privacy
 
-Message text, and any project brief you send, go to Google's Gemini API to be understood. Notion and calendar content is read for each reply and not stored by the bot.
+Message text, and any project brief you send, go to the language model provider you configured (Groq and/or Google Gemini) to be understood. Notion and calendar content is read for each reply and not stored by the bot.

@@ -142,7 +142,7 @@ test('A8 model down: rules still read the date, the reply says the model is down
   assert.equal(store.tasks[0].due, '2026-11-27');
   assert.doesNotMatch(store.tasks[0].title, /27 november/i);
   assert.match(tg.sent[0].text, /language model is not reachable/);
-  assert.ok(tg.sent.some((m) => /Gemini failed/.test(m.text) && /Model usage/.test(m.text)));
+  assert.ok(tg.sent.some((m) => /language model failed/.test(m.text) && /Model usage/.test(m.text)));
   assert.ok(!tg.sent.some((m) => /When is/.test(m.text)), 'does not ask for a date it already has');
 });
 
@@ -311,4 +311,39 @@ test('A photo or old .doc file is refused with what to send instead', async () =
   const { tg, agent } = setup();
   await agent.handleUpdate(msg('', { document: { file_id: 'f2', mime_type: 'application/msword', file_name: 'notes.doc' } }));
   assert.match(tg.last().text, /PDF, Word \(\.docx\) and plain text/);
+});
+
+test('OpenAI-compatible client: picks a text model, asks for JSON, refuses files', async () => {
+  const { openaiClient, rankOpenAIModels } = await import('../src/llm.js');
+  assert.deepEqual(rankOpenAIModels(['whisper-large-v3', 'llama-3.3-70b-versatile', 'meta-llama/llama-guard-4-12b', 'openai/gpt-oss-120b', 'some-new-model']), ['openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'some-new-model']);
+  const sent = [];
+  const fetchFake = async (url, opt) => {
+    if (url.endsWith('/models')) return { ok: true, status: 200, json: async () => ({ data: [{ id: 'whisper-large-v3' }, { id: 'openai/gpt-oss-120b' }] }) };
+    sent.push({ url, auth: opt.headers.Authorization, body: JSON.parse(opt.body) });
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"intent":"task"}' } }] }) };
+  };
+  const c = openaiClient({ key: 'k', baseUrl: 'https://api.groq.com/openai/v1/', name: 'Groq' }, fetchFake, () => '2026-11-16', {});
+  assert.deepEqual(await c.generate([{ text: 'buy paper friday' }], { json: true }), { intent: 'task' });
+  assert.equal(sent[0].url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.equal(sent[0].auth, 'Bearer k');
+  assert.equal(sent[0].body.model, 'openai/gpt-oss-120b');
+  assert.deepEqual(sent[0].body.response_format, { type: 'json_object' });
+  await assert.rejects(() => c.generate([{ inline_data: { mime_type: 'application/pdf', data: '' } }]), /cannot read files/);
+});
+
+test('Provider chain: first provider answers text, falls back when it fails, PDFs go to the one that reads files', async () => {
+  const { llmChain } = await import('../src/llm.js');
+  const { ServiceError } = await import('../src/notion.js');
+  const calls = [];
+  const mk = (name, files, fail) => ({ name, files, enabled: true, model: () => 'm', usage: () => ({ calls: 1, quotaErrors: 0, lastError: null }), generate: async () => { calls.push(name); if (fail()) throw new ServiceError('llm', 503, `${name} down`); return name; } });
+  let groqDown = false;
+  const chain = llmChain([mk('Groq', false, () => groqDown), mk('Gemini', true, () => false), { enabled: false }]);
+  assert.deepEqual(chain.providers(), ['Groq', 'Gemini']);
+  assert.equal(await chain.generate([{ text: 'x' }]), 'Groq');
+  assert.equal(await chain.generate([{ text: 'x' }, { inline_data: {} }]), 'Gemini');
+  groqDown = true;
+  assert.equal(await chain.generate([{ text: 'x' }]), 'Gemini');
+  assert.deepEqual(calls, ['Groq', 'Gemini', 'Groq', 'Gemini']);
+  const none = llmChain([mk('Groq', false, () => false)]);
+  await assert.rejects(() => none.generate([{ inline_data: {} }]), /reads PDFs/);
 });

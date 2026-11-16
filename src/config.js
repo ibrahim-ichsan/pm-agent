@@ -16,6 +16,13 @@ export function loadConfig(e = env) {
       state: e.NOTION_STATE_DS || '',
       roadmap: e.NOTION_ROADMAP_DS || '',
     },
+    // Any OpenAI-compatible provider. GROQ_API_KEY is a shortcut for Groq's free tier.
+    llm: {
+      key: e.LLM_API_KEY || e.GROQ_API_KEY || '',
+      baseUrl: e.LLM_BASE_URL || (e.GROQ_API_KEY && !e.LLM_API_KEY ? 'https://api.groq.com/openai/v1' : ''),
+      model: e.LLM_MODEL || e.GROQ_MODEL || '',
+      name: e.LLM_NAME || (e.GROQ_API_KEY && !e.LLM_API_KEY ? 'Groq' : 'LLM'),
+    },
     gemini: {
       key: e.GEMINI_API_KEY || '',
       model: e.GEMINI_MODEL || '', // empty: pick the newest Flash model the key can use
