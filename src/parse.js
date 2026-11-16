@@ -77,3 +77,48 @@ const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'and', 'for', 'my', 'on', 'i
 export function bestMatches(query, items, key = (i) => i.title, min = 0.5) {
   return items.map((i) => ({ i, s: similarity(query, key(i)) })).filter((x) => x.s >= min).sort((a, b) => b.s - a.s).map((x) => x.i);
 }
+
+// ---------- no-model paths
+// What the bot can work out by rule when the language model is unreachable: date, time, title, project or not.
+export function localIntent(text, today) { return normaliseIntent({ intent: 'task' }, text, today); }
+
+const STAGE_WORDS = [
+  [/^(rejected|reject|rejection|ditolak|tolak|gagal|declined|unsuccessful|no)$/i, 'Rejected'],
+  [/^(withdrawn|withdraw|withdrew|mundur|cancel(?:led)?)$/i, 'Withdrawn'],
+  [/^(interview|interviewing|wawancara|final interview|hr interview|phone screen)$/i, 'Interview'],
+  [/^(online test|online assessment|assessment|oa|test|tes)(?: done| selesai)?$/i, 'Online test'],
+  [/^(offer|offered|diterima|accepted|lolos)$/i, 'Offer'],
+  [/^(applied|apply|submitted|daftar)$/i, 'Applied'],
+  [/^(wishlist|wish list)$/i, 'Wishlist'],
+];
+export function stageWord(s) {
+  const w = s.trim().replace(/[.!]+$/, '');
+  for (const [re, stage] of STAGE_WORDS) if (re.test(w)) return stage;
+  return null;
+}
+// "Company — Role -> rejected", one per line. Returns [{ target, stage }] only when every line is such an update,
+// so several applications can be closed in one message without the language model.
+export function quickAppUpdates(text) {
+  const lines = text.split(/\n+/).map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const out = [];
+  for (const line of lines) {
+    const m = line.match(/^(.+?)\s*([-–—=]+>|→|⇒|➡️?|:|=)\s*([^:>→=]+)$/);
+    const stage = m && stageWord(m[3]);
+    if (!stage || m[1].trim().length < 2) return null;
+    // After a plain colon, everyday words like "test" or "no" are too likely to be an ordinary note.
+    if (/^[:=]$/.test(m[2]) && /^(test|tes|no|cancel(?:led)?|apply|applied|submitted|daftar|gagal|lolos)$/i.test(m[3].trim())) return null;
+    out.push({ target: m[1].trim(), stage });
+  }
+  return out;
+}
+// Picks the application a few words point at: one clear winner, a short list to choose from, or nothing.
+export function resolveApp(target, apps) {
+  const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const exact = apps.filter((a) => norm(a.title) === norm(target));
+  if (exact.length === 1) return { app: exact[0] };
+  const scored = apps.map((a) => ({ a, s: similarity(target, `${a.company || ''} ${a.role || ''} ${a.title}`) })).filter((x) => x.s >= 0.5).sort((x, y) => y.s - x.s);
+  if (!scored.length) return { none: true };
+  if (scored.length === 1 || (scored[0].s >= 0.8 && scored[0].s - scored[1].s >= 0.15)) return { app: scored[0].a };
+  return { choices: scored.slice(0, 5).map((x) => x.a) };
+}

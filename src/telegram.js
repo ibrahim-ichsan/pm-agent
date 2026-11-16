@@ -23,6 +23,7 @@ export function telegramClient(token, fetchImpl = fetch) {
         throw e;
       }
     },
+    typing: (chatId) => call('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {}),
     answer: (id, text) => call('answerCallbackQuery', { callback_query_id: id, text }),
     getUpdates: (offset, timeout = 30) => call('getUpdates', { offset, timeout, allowed_updates: ['message', 'callback_query'] }),
     deleteWebhook: () => call('deleteWebhook', { drop_pending_updates: false }),

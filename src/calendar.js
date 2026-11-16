@@ -88,6 +88,9 @@ export async function readCalendars(cal, ids, from, to) {
       failures.push({ id, error: e });
     }
   }
+  const seen = new Set();
+  const unique = events.filter((e) => { const k = `${e.title}|${e.date}|${e.start}|${e.end}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  events.length = 0; events.push(...unique);
   events.sort((a, b) => (a.date + (a.allDay ? '0' : '1') + (a.start || '')).localeCompare(b.date + (b.allDay ? '0' : '1') + (b.start || '')));
   return { events, failures };
 }

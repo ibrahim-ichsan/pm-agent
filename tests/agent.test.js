@@ -136,13 +136,30 @@ test('A7 roadmap match: offers Done or a new Task, files nothing until tapped', 
   assert.equal(store.roadmap[0].status, 'Done');
 });
 
-test('A8 model down: whole text as a Task, no date, tells him how to turn it back on', async () => {
+test('A8 model down: rules still read the date, the reply says the model is down and why', async () => {
   const { store, tg, agent } = setup({ llmDown: true });
-  await agent.handleUpdate(msg('submit derivatives group report friday'));
-  assert.equal(store.tasks[0].title, 'submit derivatives group report friday');
-  assert.equal(store.tasks[0].due, null);
+  await agent.handleUpdate(msg('grup project derivative 27 november deadline submit'));
+  assert.equal(store.tasks[0].due, '2026-11-27');
+  assert.doesNotMatch(store.tasks[0].title, /27 november/i);
   assert.match(tg.sent[0].text, /language model is not reachable/);
-  assert.ok(tg.sent.some((m) => /Turn the model back on/.test(m.text) && /Model usage/.test(m.text) && !/⚠️/.test(m.text)));
+  assert.ok(tg.sent.some((m) => /Gemini failed/.test(m.text) && /Model usage/.test(m.text)));
+  assert.ok(!tg.sent.some((m) => /When is/.test(m.text)), 'does not ask for a date it already has');
+});
+
+test('Several "X -> rejected" lines: no model call, no Task, one confirmation updates them all', async () => {
+  const apps = [
+    { kind: 'app', id: 'a1', title: 'JPMorgan Chase — Business Process Management Senior Associate', company: 'JPMorgan Chase', role: 'Business Process Management Senior Associate', stage: 'Applied' },
+    { kind: 'app', id: 'a2', title: 'Boston Consulting Group — Associate/Senior Associate, Full-Time, London', company: 'Boston Consulting Group', role: 'Associate/Senior Associate, Full-Time, London', stage: 'Applied' },
+    { kind: 'app', id: 'a3', title: 'Boston Consulting Group — Digital Strategy Senior Associate/Consultant (Technology & Digital Advantage)', company: 'Boston Consulting Group', role: 'Digital Strategy Senior Associate/Consultant', stage: 'Applied' },
+    { kind: 'app', id: 'a4', title: 'Kerry — Kerry Graduate Programme 2027 - Supply Chain', company: 'Kerry', role: 'Kerry Graduate Programme 2027 - Supply Chain', stage: 'Applied' },
+  ];
+  const { store, tg, agent } = setup({ llmDown: true, store: { apps } });
+  await agent.handleUpdate(msg('JPMorgan Chase — Business Process Management Senior Associate —> rejected\nBoston Consulting Group — Associate/Senior Associate, Full-Time —> rejected\nKerry — Kerry Graduate Programme 2027 - Supply Chain —> rejected'));
+  assert.equal(store.tasks.length, 0);
+  assert.match(tg.last().text, /Change these 3 applications/);
+  await agent.handleUpdate(tap(dataOf(tg.last(), /Confirm all 3/)));
+  assert.deepEqual(store.apps.map((a) => a.stage), ['Rejected', 'Rejected', 'Applied', 'Rejected']);
+  assert.match(tg.last().text, /Updated 3 of 3/);
 });
 
 test('D1 create: the reply lists every field written', async () => {
@@ -240,4 +257,28 @@ test('Expired button is answered, not ignored', async () => {
   const { tg, agent } = setup();
   await agent.handleUpdate(tap('zzz'));
   assert.match(tg.last().text, /expired/);
+});
+
+test('Model ranking: light text models first, no audio, image or video models', async () => {
+  const { rankModels } = await import('../src/llm.js');
+  const ranked = rankModels(['gemini-3.8-flash', 'gemini-3.8-flash-tts', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-omni-1.1-flash', 'gemini-3.1-flash-image', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-4-argon']);
+  assert.deepEqual(ranked, ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash']);
+});
+
+test('Gemini client: a model that times out or is overloaded falls through to the next one', async () => {
+  const { geminiClient } = await import('../src/llm.js');
+  const calls = [];
+  const fetchFake = async (url) => {
+    if (url.includes('/models?')) return { ok: true, json: async () => ({ models: ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'].map((n) => ({ name: `models/${n}`, supportedGenerationMethods: ['generateContent'] })) }) };
+    const m = url.match(/models\/([^:]+):/)[1]; calls.push(m);
+    if (m === 'gemini-3.5-flash-lite') { const e = new Error('aborted'); e.name = 'TimeoutError'; throw e; }
+    if (m === 'gemini-3.1-flash-lite') return { ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: { message: 'overloaded' } }) };
+    return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"intent":"task"}' }] } }] }) };
+  };
+  const llm = geminiClient({ key: 'k' }, fetchFake, () => '2026-11-16', {});
+  assert.deepEqual(await llm.generate([{ text: 'x' }], { json: true }), { intent: 'task' });
+  assert.deepEqual(calls, ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash']);
+  assert.equal(llm.model(), 'gemini-3.8-flash');
+  await llm.generate([{ text: 'x' }], { json: true });
+  assert.equal(calls[3], 'gemini-3.8-flash', 'the model that worked is tried first next time');
 });

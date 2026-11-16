@@ -15,6 +15,7 @@ export function explain(err, lang = 'en', ctx = {}) {
   else if (s === 'llm' && st === 429) todo = id ? 'Kuota Gemini habis. Tunggu reset atau ganti key.' : 'The Gemini quota is used up. Wait for the reset or use another key.';
   else if (st === 0 || st >= 500) todo = id ? 'Servernya lagi error atau koneksi putus. Gue coba lagi otomatis; kalau masih gagal, kirim /retry.' : 'The service is down or the connection dropped. I retry by myself; if it still fails, send /retry.';
   else todo = id ? `Error: ${err?.message}. Screenshot ini terus kasih ke Claude buat dicek.` : `Error: ${err?.message}. Screenshot this and send it to Claude to check.`;
+  if (s === 'llm' && (st === 0 || st >= 500 || st === 404 || st === 422) && err?.message) todo += id ? ` Detail: ${err.message}` : ` Detail: ${err.message}`;
   const tried = st === 0 || st >= 500 ? (id ? 'Udah gue coba ulang sekali.' : 'I already retried once.') : (id ? 'Ini bukan error sementara, jadi gue nggak retry.' : 'This is not a temporary error, so I did not retry.');
   return id ? `${name} gagal (${st}). ${tried} Yang perlu lo lakuin: ${todo}` : `${name} failed (${st}). ${tried} What to do: ${todo}`;
 }

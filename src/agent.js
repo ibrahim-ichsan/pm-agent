@@ -1,11 +1,11 @@
 // The conversation logic: commands, capture (Table A), buttons and confirmations (Table D).
 // Every outside service is injected, so tests run against fakes.
 import { parts, pretty, addDays, readDate, mondayOf, weekdayOf } from './dates.js';
-import { PARSE_PROMPT, normaliseIntent, parseCommand, detectLang, bestMatches } from './parse.js';
+import { PARSE_PROMPT, normaliseIntent, parseCommand, detectLang, bestMatches, localIntent, quickAppUpdates, resolveApp } from './parse.js';
 import { STAGES } from './notion.js';
 import { explain } from './explain.js';
 import { usageNote } from './llm.js';
-import { buildDigest, buildReview, parsePlan, agreedPlan } from './digest.js';
+import { buildDigest, buildReview, parsePlan, agreedPlan, appsNeedingAttention } from './digest.js';
 import { readCalendars } from './calendar.js';
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -52,6 +52,10 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
 
   // ---------- entry points
   async function handleUpdate(u) {
+    try { await route(u); }
+    catch (e) { log.error?.(e); try { await say(explain(e, lastLang)); } catch { /* Telegram itself is down */ } }
+  }
+  async function route(u) {
     const from = u.message?.from || u.callback_query?.from;
     if (!from) return;
     if (from.id !== cfg.ownerId) { log.warn?.(`ignored message from user ${from.id}`); return; } // AG-06
@@ -63,6 +67,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     if (replyTo && pending.has(replyTo)) { const p = pending.get(replyTo); pending.delete(replyTo); return handleReply(p, m, text); }
     if (m.document) return say(T('Reply to my brief request with the file, so I know which task it belongs to.', 'Reply ke pesan gue yang minta brief, biar gue tau file ini buat task yang mana.'));
     if (!text) return;
+    tg.typing?.(chat());
     const c = parseCommand(text);
     if (c) return handleCommand(c.cmd, c.arg);
     const lm = text.match(/^(?:please\s+)?(?:reply|answer|talk|speak)\s+in\s+(english|indonesian|bahasa)|^(?:pake|pakai|ganti)\s+bahasa\s+(inggris|indo(?:nesia)?)/i);
@@ -77,7 +82,7 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
       case 'today': return sendDigest({ manual: true });
       case 'week': return sendWeek();
       case 'tasks': return listTasks();
-      case 'apps': return listApps();
+      case 'apps': return /^(stale|basi|lama)/i.test(arg) ? listStale() : listApps();
       case 'done': return pickDone();
       case 'plan': return startPlan(arg);
       case 'brief': return startBrief(arg);
@@ -107,18 +112,24 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
   }
 
   async function capture(text, { force } = {}) {
-    const n = now();
+    // Stage updates written as "X -> rejected" need no language model, and several can come in one message.
+    let quick = force ? null : quickAppUpdates(text);
+    if (quick && quick.length === 1) {
+      // One line that names no known application is probably not an update: let the normal path read it.
+      try { if (resolveApp(quick[0].target, await store.openApps()).none) quick = null; } catch (e) { return fail(e); }
+    }
+    if (quick) return proposeStages(quick);
     const u = await understand(text);
     if (u.error) {
-      // Table A row 8: file the whole text as a Task with no date, say so, and tell him how to fix the model.
-      try {
-        const t = await store.createTask({ title: text });
-        await sayCreated(t, { note: T('The language model is not reachable, so I filed the whole message as a Task with no date.', 'Language model-nya lagi nggak bisa diakses, jadi seluruh pesan gue simpen jadi Task tanpa tanggal.') });
+      // Table A row 8: the model is unreachable, so the rules do what they can (date, time, title) and say so.
+      log.error?.(`understand failed: ${u.error.status} ${u.error.message}`);
+      const it = localIntent(text, now().date);
+      const t = await createTask(it, text, { note: T('The language model is not reachable, so I read this by rule: check the title and date.', 'Language model-nya lagi nggak bisa diakses, jadi gue baca pake aturan: cek judul sama tanggalnya.') });
+      if (t) {
         const how = explain(u.error, lastLang);
         const use = llm.enabled ? usageNote(llm.usage(), lastLang) : '';
-        await say(`${T('Turn the model back on:', 'Nyalain lagi modelnya:')} ${how}${use ? `\n${use}` : ''}`);
-        await askFollowUp(t, { needDate: true });
-      } catch (e) { lastFailed = text; await fail(e); }
+        await say(`${how}${use ? `\n${use}` : ''}`);
+      }
       return;
     }
     const it = u.intent;
@@ -152,13 +163,13 @@ export function createAgent({ cfg, store, cal, llm, tg, clock = () => new Date()
     }
   }
 
-  async function createTask(it, text = '') {
+  async function createTask(it, text = '', { note: extra = '' } = {}) {
     const fields = { title: it.title || text, area: it.area || (it.isProject ? 'Coursework' : null), priority: it.priority };
     if (it.date) { fields.due = it.date; fields.time = it.time; }
     let t;
     try { t = await store.createTask(fields); } catch (e) { lastFailed = text || it.title; return fail(e); }
     const note = it.invalidDate ? T('That date does not exist, so I filed it without one. Tell me the right date below.', 'Tanggal itu nggak ada di kalender, jadi gue simpen tanpa tanggal dulu. Kasih tanggal yang bener di bawah ya.') : '';
-    await sayCreated(t, { note });
+    await sayCreated(t, { note: [note, extra].filter(Boolean).join('\n') });
     await askFollowUp(t, { needDate: !t.due });
     if (it.isProject || t.area === 'Coursework') await askBrief(t);
     return t;
@@ -280,7 +291,7 @@ Make a task breakdown and a timeline suggestion that ends on or before the due d
 {"summary": two sentences on what the brief asks, "tasks":[{"title":..., "start":"YYYY-MM-DD", "end":"YYYY-MM-DD", "hours": number}], "risks":[short strings], "questions":[things to clarify with the group or lecturer]}
 Use only dates from today to the due date. If the due date is unknown, plan in relative weeks starting today. Do not invent requirements the brief does not state.` });
     let out;
-    try { out = await llm.generate(partsIn, { json: true }); } catch (e) { return fail(e); }
+    try { out = await llm.generate(partsIn, { json: true, timeoutMs: 90000 }); } catch (e) { return fail(e); }
     const tasks = (out.tasks || []).filter((x) => x.title && readDate(x.start || '', n.date).date && readDate(x.end || '', n.date).date && (!p.due || x.end <= p.due));
     await store.updateTask(p.id, { brief: briefNote.slice(0, 1900), plan: JSON.stringify({ status: 'suggested', milestones: tasks.map((x) => ({ title: x.title, date: x.end, start: x.start })) }) });
     const lines = [`<b>${T('Suggested breakdown', 'Saran breakdown')} · ${esc(p.title)}</b>`, esc(out.summary || '')];
@@ -349,11 +360,29 @@ Use only dates from today to the due date. If the due date is unknown, plan in r
     let apps;
     try { apps = await store.openApps(); } catch (e) { return fail(e); }
     const q = it.target || it.company || it.title;
-    const hits = bestMatches(q, apps, (a) => `${a.company} ${a.role} ${a.title}`, 0.5);
-    if (!hits.length) return say(T(`No open application matches "${esc(q)}". /apps lists them.`, `Nggak ada lamaran aktif yang cocok sama "${esc(q)}". Cek /apps.`));
-    const stage = it.stage || nextStage(hits[0].stage);
-    if (hits.length > 1) return say(T('Which one?', 'Yang mana?'), { buttons: hits.slice(0, 6).map((a) => btn(a.title.slice(0, 50), { type: 'stage_confirm', id: a.id, title: a.title, from: a.stage, to: stage })) });
-    return confirmStage(hits[0], stage);
+    const r = resolveApp(q, apps);
+    if (r.none) return say(T(`No open application matches "${esc(q)}". /apps lists them.`, `Nggak ada lamaran aktif yang cocok sama "${esc(q)}". Cek /apps.`));
+    if (r.choices) return say(T(`Which one is "${esc(q)}"?`, `"${esc(q)}" itu yang mana?`), { buttons: r.choices.map((a) => btn(a.title.slice(0, 50), { type: 'stage_confirm', id: a.id, title: a.title, from: a.stage, to: it.stage || nextStage(a.stage) })) });
+    return confirmStage(r.app, it.stage || nextStage(r.app.stage));
+  }
+  // Several "X -> stage" lines at once: one summary, one confirmation for everything that matched cleanly.
+  async function proposeStages(updates) {
+    if (updates.length === 1) return proposeStage(updates[0]);
+    let apps;
+    try { apps = await store.openApps(); } catch (e) { return fail(e); }
+    const ready = []; const unclear = []; const missing = [];
+    for (const u of updates) {
+      const r = resolveApp(u.target, apps);
+      if (r.app && !ready.some((x) => x.id === r.app.id)) ready.push({ id: r.app.id, title: r.app.title, from: r.app.stage, to: u.stage });
+      else if (r.choices) unclear.push({ ...u, choices: r.choices });
+      else if (r.none) missing.push(u.target);
+    }
+    if (ready.length) {
+      const lines = [T(`Change these ${ready.length} applications?`, `Ubah ${ready.length} lamaran ini?`), ...ready.map((x) => `• ${esc(x.title)}: ${x.from} → ${x.to}`)];
+      await say(lines.join('\n'), { buttons: [btn(T(`Confirm all ${ready.length}`, `Konfirmasi ${ready.length}-nya`), { type: 'apply_stages', items: ready }), btn(T('Cancel', 'Batal'), { type: 'cancel' })] });
+    }
+    for (const u of unclear) await say(T(`Which one is "${esc(u.target)}"? (→ ${u.stage})`, `"${esc(u.target)}" itu yang mana? (→ ${u.stage})`), { buttons: u.choices.map((a) => btn(a.title.slice(0, 50), { type: 'apply_stage', id: a.id, to: u.stage })) });
+    if (missing.length) await say(T('No open application matches:', 'Nggak ada lamaran aktif yang cocok:') + `\n${missing.map((m) => `• ${esc(m)}`).join('\n')}\n${T('They may already be closed. /apps lists the open ones.', 'Mungkin udah ditutup. Cek /apps buat yang masih aktif.')}`);
   }
   const nextStage = (s) => STAGES[Math.min(STAGES.indexOf(s) + 1, 3)] || 'Online test';
   async function confirmStage(a, to) {
@@ -445,6 +474,17 @@ Use only dates from today to the due date. If the due date is unknown, plan in r
           const app = await store.updateApp(a.id, { stage: a.to, lastUpdate: n.date, followUp: days ? addDays(n.date, days) : null });
           return say(T(`"${esc(app.title)}" is now ${app.stage}.${app.followUp ? ` Next follow-up ${pretty(app.followUp)}.` : ''}`, `"${esc(app.title)}" sekarang ${app.stage}.${app.followUp ? ` Follow-up berikutnya ${pretty(app.followUp)}.` : ''}`));
         }
+        case 'apply_stages': {
+          const n = now(); const ok = []; const bad = [];
+          for (const x of a.items) {
+            const days = FOLLOW_UP_DAYS[x.to];
+            try { await store.updateApp(x.id, { stage: x.to, lastUpdate: n.date, followUp: days ? addDays(n.date, days) : null }); ok.push(x); }
+            catch (e) { log.error?.(e); bad.push(x); }
+          }
+          const lines = [T(`Updated ${ok.length} of ${a.items.length} in Notion:`, `${ok.length} dari ${a.items.length} udah keupdate di Notion:`), ...ok.map((x) => `• ${esc(x.title)} → ${x.to}`)];
+          if (bad.length) lines.push('', T('Failed, send these again:', 'Gagal, kirim ulang yang ini:'), ...bad.map((x) => `• ${esc(x.title)}`));
+          return say(lines.join('\n'));
+        }
         case 'brief_for': return askBrief(a);
         case 'plan_for': return askPlan(a);
         case 'plan_to_cal': return planToCalendar(a.taskId);
@@ -473,7 +513,14 @@ Use only dates from today to the due date. If the due date is unknown, plan in r
     if (!apps.length) return say(T('No open applications.', 'Nggak ada lamaran aktif.'));
     apps.sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999') || (a.appliedOn || '').localeCompare(b.appliedOn || ''));
     const lines = apps.slice(0, 25).map((a) => `• ${esc(a.title)} · ${a.stage}${a.due ? ` · ${T('deadline', 'deadline')} ${pretty(a.due)}` : ''}`);
-    return say(`<b>${T('Open applications', 'Lamaran aktif')} (${apps.length})</b>\n${lines.join('\n')}${apps.length > 25 ? `\n…${apps.length - 25} more` : ''}\n\n${T('Update one by writing e.g. "AIB grad risk: online test done".', 'Update dengan nulis misalnya "AIB grad risk: online test done".')}`);
+    return say(`<b>${T('Open applications', 'Lamaran aktif')} (${apps.length})</b>\n${lines.join('\n')}${apps.length > 25 ? `\n…${apps.length - 25} more` : ''}\n\n${T('Update by writing e.g. "AIB grad risk -> interview", several lines at once is fine. /apps stale lists the ones gone quiet.', 'Update dengan nulis misalnya "AIB grad risk -> interview", boleh beberapa baris sekaligus. /apps stale buat yang udah lama nggak ada kabar.')}`);
+  }
+  async function listStale() {
+    let apps; try { apps = await store.openApps(); } catch (e) { return fail(e); }
+    const { stale } = appsNeedingAttention(apps, now().date, cfg.followUpIdleDays);
+    if (!stale.length) return say(T('No stale applications.', 'Nggak ada lamaran yang basi.'));
+    const lines = stale.slice(0, 40).map((x) => `• ${esc(x.a.title)} · ${x.days}d`);
+    return say(`<b>${T(`No news for ${cfg.followUpIdleDays}+ days`, `Tanpa kabar ${cfg.followUpIdleDays}+ hari`)} (${stale.length})</b>\n${lines.join('\n')}${stale.length > 40 ? `\n…${stale.length - 40} more` : ''}\n\n${T('Close several at once, one per line:\nApplegreen -> rejected\nBDO Ireland -> withdrawn', 'Tutup beberapa sekaligus, satu per baris:\nApplegreen -> rejected\nBDO Ireland -> withdrawn')}`);
   }
   async function sendWeek() {
     const n = now(); const end = addDays(n.date, 7);

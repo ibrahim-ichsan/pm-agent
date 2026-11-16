@@ -26,10 +26,12 @@ const cfg = loadConfig();
 const gaps = missing(cfg);
 if (gaps.length) { console.error(`Missing config vars: ${gaps.join(', ')}`); process.exit(1); }
 
-const store = notionStore(notionClient(cfg.notionToken), cfg.notion);
-const cal = calendarClient(cfg.google.serviceAccount);
-const llm = geminiClient(cfg.gemini, fetch, () => parts(new Date()).date);
-const tg = telegramClient(cfg.telegramToken);
+// Every outside call has a deadline, so one hung request cannot freeze the bot.
+const within = (ms) => (url, opt = {}) => fetch(url, { ...opt, signal: opt.signal || AbortSignal.timeout(ms) });
+const store = notionStore(notionClient(cfg.notionToken, within(20000)), cfg.notion);
+const cal = calendarClient(cfg.google.serviceAccount, within(20000));
+const llm = geminiClient(cfg.gemini, within(20000), () => parts(new Date()).date);
+const tg = telegramClient(cfg.telegramToken, within(45000));
 const agent = createAgent({ cfg, store, cal, llm, tg });
 const scheduler = createScheduler({ cfg, store, agent });
 

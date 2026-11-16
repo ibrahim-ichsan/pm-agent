@@ -17,17 +17,21 @@ function block(title, lines, lang) {
 export function parsePlan(plan) { try { const p = JSON.parse(plan || ''); return Array.isArray(p.milestones) ? p : null; } catch { return null; } }
 export const agreedPlan = (plan) => { const p = parsePlan(plan); return p && p.status === 'agreed' ? p : null; };
 
+// Applications split in two: "dated" has a deadline or a follow-up date inside the next week and is worth a line each;
+// "stale" is everything in Applied that has gone quiet, which the digest only counts.
 export function appsNeedingAttention(apps, today, idleDays = 14) {
-  const out = [];
+  const dated = []; const stale = [];
   for (const a of apps) {
     const reasons = [];
     if (a.due && diffDays(a.due, today) >= 0 && diffDays(a.due, today) <= 7) reasons.push({ sort: a.due, text: `deadline ${pretty(a.due)}` });
-    if (a.followUp && diffDays(a.followUp, today) <= 7) reasons.push({ sort: a.followUp, text: `follow up ${pretty(a.followUp)}` });
+    if (a.followUp && diffDays(a.followUp, today) <= 7 && diffDays(a.followUp, today) >= -7) reasons.push({ sort: a.followUp, text: `follow up ${pretty(a.followUp)}` });
+    if (reasons.length) { dated.push({ a, sort: reasons.map((r) => r.sort).sort()[0], text: reasons.map((r) => r.text).join('; ') }); continue; }
     const since = a.lastUpdate || a.appliedOn;
-    if (a.stage === 'Applied' && since && diffDays(today, since) >= idleDays) reasons.push({ sort: '9' + since, text: `no news for ${diffDays(today, since)} days, follow up` });
-    if (reasons.length) out.push({ a, sort: reasons.map((r) => r.sort).sort()[0], text: reasons.map((r) => r.text).join('; ') });
+    if (a.stage === 'Applied' && since && diffDays(today, since) >= idleDays) stale.push({ a, days: diffDays(today, since) });
   }
-  return out.sort((x, y) => x.sort.localeCompare(y.sort));
+  dated.sort((x, y) => x.sort.localeCompare(y.sort));
+  stale.sort((x, y) => y.days - x.days);
+  return { dated, stale };
 }
 
 export function buildDigest(d) {
@@ -54,7 +58,10 @@ export function buildDigest(d) {
   blocks.push(block(L(lang, "This week's roadmap", 'Roadmap minggu ini'), road.map((r) => `• ${esc(r.title)}${r.priority ? ` (${r.priority})` : ''}`), lang));
   // Applications
   const att = appsNeedingAttention(d.apps, today, d.idleDays);
-  blocks.push(block(L(lang, 'Applications', 'Lamaran kerja'), att.map((x) => `• ${esc(x.a.title)}: ${x.text}`), lang));
+  const appLines = att.dated.slice(0, 5).map((x) => `• ${esc(x.a.title)}: ${x.text}`);
+  if (att.dated.length > 5) appLines.push(L(lang, `…and ${att.dated.length - 5} more with a date this week`, `…dan ${att.dated.length - 5} lagi yang ada tanggalnya minggu ini`));
+  if (att.stale.length) appLines.push(L(lang, `• ${att.stale.length} with no news for ${d.idleDays || 14}+ days (oldest: ${esc(att.stale[0].a.company || att.stale[0].a.title)}, ${att.stale[0].days} days). /apps stale`, `• ${att.stale.length} tanpa kabar ${d.idleDays || 14}+ hari (paling lama: ${esc(att.stale[0].a.company || att.stale[0].a.title)}, ${att.stale[0].days} hari). /apps stale`));
+  blocks.push(block(L(lang, 'Applications', 'Lamaran kerja'), appLines, lang));
 
   const present = blocks.filter(Boolean);
   const lines = [];

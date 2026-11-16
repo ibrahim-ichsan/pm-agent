@@ -72,11 +72,15 @@ test('B6 calendar unreadable: other blocks stay, plus what to do', () => {
   assert.match(text, /ucd is not shared with bot@x\.iam\.gserviceaccount\.com/);
 });
 
-test('Applied with no news for 14 days shows under follow-up', () => {
-  const { text } = buildDigest({ ...base, apps: [{ title: 'Kerry — Grad', stage: 'Applied', appliedOn: '2026-10-20', lastUpdate: '2026-10-20' }, { title: 'Fresh', stage: 'Applied', appliedOn: '2026-11-10' }] });
-  assert.match(text, /Kerry — Grad: no news for 27 days, follow up/);
-  assert.doesNotMatch(text, /Fresh/);
+test('Quiet applications collapse into one count line; dated ones keep a line each', () => {
+  const quiet = Array.from({ length: 40 }, (_, i) => ({ title: `Co${i} — Grad`, company: `Co${i}`, stage: 'Applied', appliedOn: '2026-09-10' }));
+  const apps = [{ title: 'Kerry — Grad', company: 'Kerry', stage: 'Applied', appliedOn: '2026-09-06' }, ...quiet, { title: 'AIB — Risk', stage: 'Applied', appliedOn: '2026-11-10', due: '2026-11-19' }, { title: 'Fresh', stage: 'Applied', appliedOn: '2026-11-10' }];
+  const { text } = buildDigest({ ...base, apps });
+  assert.match(text, /AIB — Risk: deadline/);
+  assert.match(text, /41 with no news for 14\+ days \(oldest: Kerry, \d+ days\)\. \/apps stale/);
+  assert.doesNotMatch(text, /Co7 — Grad|Fresh/);
 });
+
 
 test('Weekly and midweek reviews', () => {
   const d = { ...base, today: '2026-11-22', doneThisWeek: [task('Done thing', '2026-11-18')], tasks: [task('Late one', '2026-11-20'), task('Next', '2026-11-25')], apps: [{ title: 'AIB', stage: 'Applied' }, { title: 'PTSB', stage: 'Online test' }] };
