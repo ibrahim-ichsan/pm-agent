@@ -1,0 +1,11 @@
+{
+  "name": "pm-agent",
+  "private": true,
+  "type": "module",
+  "description": "Komplot: a Telegram PM bot backed by Notion and Google Calendar",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/*.test.js"
+  }
+}

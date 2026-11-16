@@ -1,0 +1,49 @@
+// Entry point: long-polls Telegram and ticks the scheduler once a minute.
+import { createServer } from 'node:http';
+import { loadConfig, missing } from './config.js';
+import { notionClient, notionStore } from './notion.js';
+import { calendarClient } from './calendar.js';
+import { geminiClient } from './llm.js';
+import { telegramClient } from './telegram.js';
+import { createAgent } from './agent.js';
+import { createScheduler } from './scheduler.js';
+import { parts } from './dates.js';
+
+const cfg = loadConfig();
+const gaps = missing(cfg);
+if (gaps.length) { console.error(`Missing config vars: ${gaps.join(', ')}`); process.exit(1); }
+
+const store = notionStore(notionClient(cfg.notionToken), cfg.notion);
+const cal = calendarClient(cfg.google.serviceAccount);
+const llm = geminiClient(cfg.gemini, fetch, () => parts(new Date()).date);
+const tg = telegramClient(cfg.telegramToken);
+const agent = createAgent({ cfg, store, cal, llm, tg });
+const scheduler = createScheduler({ cfg, store, agent });
+
+await tg.deleteWebhook().catch(() => {});
+await tg.setCommands([
+  ['today', 'Digest now'], ['week', 'Next 7 days'], ['tasks', 'Open tasks'], ['apps', 'Open applications'],
+  ['done', 'Tick things off'], ['add', 'Add a task'], ['brief', 'Send a project brief'], ['plan', 'Save an agreed plan'],
+  ['shift', 'Log a part-time shift'], ['usage', 'Model usage'], ['lang', 'en | id | auto'], ['help', 'How to use me'],
+].map(([command, description]) => ({ command, description }))).catch((e) => console.warn('setMyCommands failed', e.message));
+
+console.log(`Komplot running. Calendars: ${cfg.google.readCalendars.join(', ') || 'none'}. Model: ${cfg.gemini.key ? cfg.gemini.model || 'auto' : 'off'}.`);
+setInterval(() => scheduler.tick().catch((e) => console.error('tick', e)), 60 * 1000);
+scheduler.tick().catch((e) => console.error('tick', e));
+
+// Optional health endpoint for hosts that need a web port.
+if (process.env.PORT) createServer((_, res) => res.end('ok')).listen(process.env.PORT);
+
+let offset = 0;
+for (;;) {
+  try {
+    const updates = await tg.getUpdates(offset, 30);
+    for (const u of updates) {
+      offset = u.update_id + 1;
+      await agent.handleUpdate(u).catch((e) => console.error('update', e));
+    }
+  } catch (e) {
+    console.error('poll', e.message);
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+}
